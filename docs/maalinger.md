@@ -115,3 +115,4 @@ Feltet faller som 1/r³, så 1000× bedre følsomhet gir grovt 10× rekkevidde.
 - [ ] Rekkevidde med avstemt mottakerspole
 - [ ] Rekkevidde med AS3933
 - [ ] Noe enda kulere, bro
+- [ ] Funker nå
