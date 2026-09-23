@@ -1,0 +1,29 @@
+# Zephyr / west
+build/
+build-*/
+.west/
+twister-out*/
+
+# VS Code
+.vscode/
+
+# nRF Connect
+*.hex
+*.elf
+*.map
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+*.swp
+*~
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
