@@ -114,3 +114,4 @@ Feltet faller som 1/r³, så 1000× bedre følsomhet gir grovt 10× rekkevidde.
 - [ ] Kabelens egen kapasitans (for å kompensere ved RX-måling)
 - [ ] Rekkevidde med avstemt mottakerspole
 - [ ] Rekkevidde med AS3933
+- [ ] Noe enda kulere, bro
