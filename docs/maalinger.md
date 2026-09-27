@@ -114,8 +114,3 @@ Feltet faller som 1/r³, så 1000× bedre følsomhet gir grovt 10× rekkevidde.
 - [ ] Kabelens egen kapasitans (for å kompensere ved RX-måling)
 - [ ] Rekkevidde med avstemt mottakerspole
 - [ ] Rekkevidde med AS3933
-<<<<<<< HEAD
-
-=======
-- [ ] Lodde ledninger på AS3933-BTST spole
->>>>>>> 6abc138c106012be5f109815db041f3079a0b5ba
