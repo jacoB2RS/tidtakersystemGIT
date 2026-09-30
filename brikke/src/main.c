@@ -1,11 +1,15 @@
 /*
- * AS3933 SPI-diagnose
+ * AS3933 SPI-diagnose, versjon 2
+ *
+ * Nytt siden v1: SPI_CS_ACTIVE_HIGH er lagt til. AS3933 har aktiv-hoy
+ * chip select, og i Zephyr ma BADE devicetree (GPIO_ACTIVE_HIGH pa
+ * cs-gpios) og koden (SPI_CS_ACTIVE_HIGH, BIT(14)) si det.
  *
  * Prover alle fire SPI-modusene og leser R5 og R6 i hver.
  * Default er R5=0x69 og R6=0x96.
  *
- * Etterpa kjorer den kontinuerlig SPI-trafikk sa signalene kan males
- * med skop uten a mase med reset-timing:
+ * Etterpa kjorer den kontinuerlig SPI-trafikk hvert halve sekund,
+ * sa signalene kan males med skop uten a mase med reset-timing:
  *   P1.07 CS   - skal ga HOY under hver overforing
  *   P1.04 SCL  - klokkeburst, 16 pulser per lesing
  *   P1.05 SDI  - kommandoen ut av nRF
@@ -24,11 +28,11 @@
 
 #define AS3933_CMD_PRESET_DEFAULT 0x04
 
+#define SPI_BASE (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_CS_ACTIVE_HIGH)
+
 /* Ikke const - vi endrer operation underveis */
-static struct spi_dt_spec as3933 = SPI_DT_SPEC_GET(
-	DT_NODELABEL(as3933),
-	SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
-	0);
+static struct spi_dt_spec as3933 =
+	SPI_DT_SPEC_GET(DT_NODELABEL(as3933), SPI_BASE, 0);
 
 static const struct gpio_dt_spec wake =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(as3933_wake), gpios);
@@ -62,7 +66,7 @@ static int kommando(uint8_t kode)
 
 static void sett_modus(int m)
 {
-	uint16_t op = SPI_WORD_SET(8) | SPI_TRANSFER_MSB;
+	uint32_t op = SPI_BASE;
 
 	if (m & 1) {
 		op |= SPI_MODE_CPHA;
@@ -81,7 +85,7 @@ int main(void)
 
 	k_msleep(500);
 
-	printk("\n\n=== AS3933 SPI-diagnose ===\n\n");
+	printk("\n\n=== AS3933 SPI-diagnose v2 (CS aktiv hoy) ===\n\n");
 
 	if (!spi_is_ready_dt(&as3933)) {
 		printk("FEIL: SPI-bussen er ikke klar\n");
@@ -128,7 +132,7 @@ int main(void)
 	} else {
 		printk("Ingen modus traff.\n\n");
 		printk("Kjorer na kontinuerlig lesing i modus 1.\n");
-		printk("Sett skopet pa disse, i denne rekkefolgen:\n");
+		printk("Skop, i denne rekkefolgen:\n");
 		printk("  P1.04 SCL  - kommer det klokkeburst?\n");
 		printk("  P1.07 CS   - gar den HOY under bursten?\n");
 		printk("  P1.05 SDI  - ser du 0x45 sendt ut?\n");
