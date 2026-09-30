@@ -1,0 +1,66 @@
+/*
+ * Brikken: AS3933 LF wake-up receiver over SPI
+ *
+ * VIKTIG: AS3933 har AKTIV-HOY chip select. Derfor GPIO_ACTIVE_HIGH
+ * pa cs-gpios. Zephyr antar aktiv-lav som standard, og med feil
+ * polaritet svarer brikken bare med nuller.
+ *
+ * Pinnevalg: UART1 (P1.04-P1.07) ma kobles fra i Board Configurator
+ * for disse kan brukes som GPIO. UART0 (P0.00-P0.03) beholdes til
+ * konsollen.
+ *
+ * Ledige alternativer hvis UART1 ikke frigjores: P1.11, P1.12,
+ * P2.06, P2.08, P2.10.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+&pinctrl {
+	spi21_default: spi21_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 1, 4)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 5)>,
+				<NRF_PSEL(SPIM_MISO, 1, 6)>;
+		};
+	};
+
+	spi21_sleep: spi21_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 1, 4)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 5)>,
+				<NRF_PSEL(SPIM_MISO, 1, 6)>;
+			low-power-enable;
+		};
+	};
+};
+
+&spi21 {
+	status = "okay";
+	pinctrl-0 = <&spi21_default>;
+	pinctrl-1 = <&spi21_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	/* AKTIV HOY - ikke GPIO_ACTIVE_LOW */
+	cs-gpios = <&gpio1 7 GPIO_ACTIVE_HIGH>;
+
+	as3933: as3933@0 {
+		compatible = "vnd,spi-device";
+		reg = <0>;
+		spi-max-frequency = <1000000>;
+	};
+};
+
+/ {
+	aliases {
+		as3933-wake = &as3933_wake;
+	};
+
+	as3933_gpio {
+		compatible = "gpio-keys";
+
+		as3933_wake: wake {
+			gpios = <&gpio1 11 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+			label = "AS3933 WAKE";
+		};
+	};
+};
