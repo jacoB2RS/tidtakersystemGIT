@@ -180,7 +180,7 @@ int main(void)
 		uint32_t na;
 
 		kommando(CMD_RESET_RSSI);
-		k_msleep(100);
+		k_msleep(600);
 
 		les(REG_RSSI1, &r1);
 		les(REG_RSSI2, &r2);
@@ -197,7 +197,6 @@ int main(void)
 		forrige = na;
 
 		kommando(CMD_CLEAR_WAKE);
-		k_msleep(300);
 	}
 
 	return 0;
