@@ -89,3 +89,11 @@ AS3933 sitter på LCQT-TSSOP16 breakout (0,65 mm pitch).
   1500 og 150 i serie gir 136 pF → resonans på 438 kHz, ingen feltstyrke.
 - **Kabel uten 10× probe belaster tanken** med ca. 200 pF og flytter
   resonansen flere kHz ned. Mål over motstanden i stedet.
+- **Feil funnnet og fikset**
+  Rotarsak: konsollen (uart20) brukte P1.04-P1.07, samme pinner som SPI.
+  UART-en drev P1.06, sa MISO aldri leste noe fra AS3933. Alle registre
+  leste 0x00 uansett SPI-modus og CS-polaritet.
+
+  Konsollen gar na pa uart30 (P0.00-P0.03) og flytter til COM4.
+  Fungerende SPI-modus: 1 og 2 (begge sampler pa fallende flanke)."
+  
