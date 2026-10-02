@@ -1,7 +1,0 @@
-default: brikke
-build_dir: C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1
-domains:
-  - name: brikke
-    build_dir: C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/brikke
-flash_order:
-  - brikke
