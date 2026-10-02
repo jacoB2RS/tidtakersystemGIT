@@ -1,6 +1,6 @@
 # Zephyr / west
-build/
-build-*/
+build*/
+build*/
 .west/
 twister-out*/
 
