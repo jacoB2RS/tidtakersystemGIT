@@ -25,13 +25,13 @@
 #define MODE_BURST        2
 #define MODE_SVEIP        3
 
-#define MODE MODE_BURST
+#define MODE MODE_KONTINUERLIG
 
 /* 16 MHz / 128 = 125,0 kHz */
 #define PERIODE_125K_NS 8000u
 
 #define BURST_MS 20
-#define PAUSE_MS 2000
+#define PAUSE_MS 500
 
 /*
  * Sveip. N er antall klokketikk pa 16 MHz: f = 16 MHz / N.
