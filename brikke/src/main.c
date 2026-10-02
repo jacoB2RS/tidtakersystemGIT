@@ -1,19 +1,26 @@
 /*
- * Brikken: AS3933 feltstyrkemaler
+ * Brikken: AS3933 feltdeteksjon med WAKE
  *
- * SPI-modus 1 (CPOL=0, CPHA=1). Bekreftet mot R5=0x69 / R6=0x96.
- * CS er aktiv hoy - bade GPIO_ACTIVE_HIGH i overlay og
- * SPI_CS_ACTIVE_HIGH her.
+ * Endringer fra forrige versjon:
+ *   - Calib_RCO_LC kalles ved oppstart. RC-oscillatoren MA kalibreres
+ *     for frekvensdeteksjon virker. Det var grunnen til at WAKE alltid
+ *     sto pa 0.
+ *   - Gain boost av, og gain reduction pa, sa signalet ikke metter pa 31
+ *     og stoygulvet faller.
+ *   - Strammere frekvenstoleranse, 16+/-2 i stedet for 16+/-6, sa
+ *     tilfeldig stoy ikke utloser WAKE.
  *
- * Oppsett for forste feltmaling:
- *   R1 = 0x00  intern RC-oscillator (ingen krystall montert),
- *              ingen monstergjenkjenning -> WAKE gar hoy pa
- *              ren baerebolge alene
- *   R2 = 0x20  +3 dB forsterkning (G_BOOST)
- *   R0 = 0x0E  alle tre kanaler aktive (fabrikkverdi)
+ * Mal fra loggen 2026-10-02 uten demping: stoygulv 13-19, metning 31.
+ * Juster GAIN_REDUKSJON til stoygulvet ligger pa 0-3.
  *
- * RSSI er peak-hold, sa reset_RSSI kalles hver runde for at
- * avlesningen skal folge feltet i sanntid.
+ * R4<3:0> GR fra databladet:
+ *   0x00  ingen reduksjon
+ *   0x04  -4 dB
+ *   0x05  -8 dB
+ *   0x08  -12 dB
+ *   0x09  -16 dB
+ *   0x0C  -20 dB
+ *   0x0D  -24 dB
  */
 
 #include <zephyr/kernel.h>
@@ -28,14 +35,22 @@
 
 #define CMD_CLEAR_WAKE     0x00
 #define CMD_RESET_RSSI     0x01
+#define CMD_TRIM_OSC       0x02
+#define CMD_CLEAR_FALSE    0x03
 #define CMD_PRESET_DEFAULT 0x04
+#define CMD_CALIB_RCO_LC   0x05
 
 #define REG_R0     0
 #define REG_R1     1
 #define REG_R2     2
+#define REG_R4     4
+#define REG_R8     8
 #define REG_RSSI1 10
 #define REG_RSSI2 11
 #define REG_RSSI3 12
+
+/* Juster denne. Start pa 0x05 (-8 dB). */
+#define GAIN_REDUKSJON 0x05
 
 /* Modus 1: CPHA satt, CPOL av */
 #define SPI_OPER (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | \
@@ -83,7 +98,6 @@ static int kommando(uint8_t kode)
 	return spi_write_dt(&as3933, &tx_set);
 }
 
-/* Enkel sojlegraf, 0-31 */
 static void soyle(uint8_t v)
 {
 	for (int i = 0; i < 32; i++) {
@@ -94,53 +108,61 @@ static void soyle(uint8_t v)
 int main(void)
 {
 	uint8_t v;
+	uint8_t wake_teller = 0;
 
 	k_msleep(500);
 
-	printk("\n\n=== AS3933 feltstyrkemaler ===\n\n");
+	printk("\n\n=== AS3933 feltdeteksjon ===\n\n");
 
 	if (!spi_is_ready_dt(&as3933)) {
 		printk("FEIL: SPI-bussen er ikke klar\n");
 		return -ENODEV;
 	}
-
 	if (!gpio_is_ready_dt(&wake)) {
 		printk("FEIL: WAKE-pinnen er ikke klar\n");
 		return -ENODEV;
 	}
 	gpio_pin_configure_dt(&wake, GPIO_INPUT);
 
-	/* Kjent utgangspunkt */
 	kommando(CMD_PRESET_DEFAULT);
 	k_msleep(20);
 
-	/* Bekreft at SPI fortsatt snakker */
 	les(5, &v);
-	if (v != 0x69) {
-		printk("ADVARSEL: R5 leste 0x%02X, forventet 0x69\n", v);
-		printk("SPI svarer ikke riktig. Sjekk oppkoblingen.\n\n");
-	} else {
-		printk("SPI ok (R5 = 0x69)\n");
-	}
+	printk("SPI: R5 = 0x%02X %s\n\n", v, v == 0x69 ? "(ok)" : "(AVVIK)");
 
-	/* Intern RC, ingen monstergjenkjenning */
+	/*
+	 * R1 = 0x00  intern RC-osc, ingen monstergjenkjenning
+	 * R2 = 0x02  gain boost AV, frekvenstoleranse 16+/-2 (strammest)
+	 * R4         gain reduction
+	 * R8 = 0x00  band 95-150 kHz (dekker 125 kHz)
+	 */
 	skriv(REG_R1, 0x00);
-	/* +3 dB forsterkning */
-	skriv(REG_R2, 0x20);
+	skriv(REG_R2, 0x02);
+	skriv(REG_R4, GAIN_REDUKSJON & 0x0F);
+	skriv(REG_R8, 0x00);
 	k_msleep(20);
 
-	les(REG_R0, &v);
-	printk("R0 = 0x%02X  (kanaler aktive)\n", v);
-	les(REG_R1, &v);
-	printk("R1 = 0x%02X  (0x00 = RC-osc, frekvensdeteksjon)\n", v);
-	les(REG_R2, &v);
-	printk("R2 = 0x%02X  (0x20 = gain boost)\n\n", v);
+	/* MA gjores for frekvensdeteksjon virker */
+	printk("Kalibrerer RC-oscillator mot antennetanken...\n");
+	kommando(CMD_CALIB_RCO_LC);
+	k_msleep(100);
 
-	printk("Start senderen og hold spolen naer sendespolen.\n");
-	printk("k1 er kanalen med spolen. k2 og k3 er ikke koblet.\n\n");
+	kommando(CMD_CLEAR_FALSE);
+	kommando(CMD_CLEAR_WAKE);
+	k_msleep(20);
+
+	for (uint8_t r = 0; r <= 8; r++) {
+		les(r, &v);
+		printk("R%-2u = 0x%02X\n", r, v);
+	}
+
+	printk("\nStoygulvet bor ligge pa 0-3 na.\n");
+	printk("Ligger det hoyere: ok GAIN_REDUKSJON i koden.\n");
+	printk("Metter det fortsatt pa 31 langt unna: ok mer.\n\n");
 
 	while (1) {
 		uint8_t r1 = 0, r2 = 0, r3 = 0;
+		int w;
 
 		kommando(CMD_RESET_RSSI);
 		k_msleep(100);
@@ -148,15 +170,20 @@ int main(void)
 		les(REG_RSSI1, &r1);
 		les(REG_RSSI2, &r2);
 		les(REG_RSSI3, &r3);
+		w = gpio_pin_get_dt(&wake);
 
 		r1 &= 0x1F;
 		r2 &= 0x1F;
 		r3 &= 0x1F;
 
+		if (w) {
+			wake_teller++;
+		}
+
 		printk("k1=%2u ", r1);
 		soyle(r1);
-		printk("   k2=%2u k3=%2u  WAKE=%d\n",
-		       r2, r3, gpio_pin_get_dt(&wake));
+		printk("   k2=%2u k3=%2u  WAKE=%d  (%u)\n",
+		       r2, r3, w, wake_teller);
 
 		kommando(CMD_CLEAR_WAKE);
 		k_msleep(300);
