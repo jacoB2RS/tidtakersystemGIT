@@ -1,0 +1,13 @@
+# Target labels
+ brikke
+# Source files and their labels
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/CMakeFiles/brikke
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/CMakeFiles/brikke.rule
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/CMakeFiles/brikke-complete.rule
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-build.rule
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-configure.rule
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-download.rule
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-install.rule
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-mkdir.rule
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-patch.rule
+C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-update.rule

@@ -1,0 +1,25 @@
+cmake:
+  application:
+    source-dir: 'C:/ncs/v3.4.1/zephyr/share/sysbuild'
+  board:
+    name: 'nrf54l15dk'
+    path:
+     - 'C:/ncs/v3.4.1/zephyr/boards/nordic/nrf54l15dk'
+    qualifiers: 'nrf54l15/cpuapp'
+    revision: ''
+  images:
+   - name: 'brikke'
+     source-dir: 'C:/Users/ncs-projects/tidtakersystemGIT/brikke'
+     type: 'MAIN'
+  kconfig:
+    files:
+     - 'C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/empty.conf'
+     - 'C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/empty.conf'
+    user-files:
+     - 'C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/empty.conf'
+  sysbuild: 'true'
+version: '0.1.0'
+west:
+  command: 'C:\ncs\toolchains\4f5b6ad6dd\opt\bin\Scripts\west build --build-dir c:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1 c:/Users/ncs-projects/tidtakersystemGIT/brikke --pristine --board nrf54l15dk/nrf54l15/cpuapp -- -DCONFIG_DEBUG_THREAD_INFO=y'
+  topdir: 'c:\ncs\v3.4.1'
+  version: '1.5.0'

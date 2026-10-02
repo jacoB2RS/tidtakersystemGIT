@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/CMakeFiles/brikke"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/CMakeFiles/brikke.rule"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/CMakeFiles/brikke-complete.rule"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-build.rule"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-configure.rule"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-download.rule"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-install.rule"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-mkdir.rule"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-patch.rule"
+		},
+		{
+			"file" : "C:/Users/ncs-projects/tidtakersystemGIT/brikke/build_1/_sysbuild/sysbuild/images/brikke-prefix/src/brikke-stamp/brikke-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"brikke"
+		],
+		"name" : "brikke"
+	}
+}

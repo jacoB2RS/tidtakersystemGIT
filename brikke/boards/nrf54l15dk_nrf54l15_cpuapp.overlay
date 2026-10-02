@@ -1,19 +1,39 @@
 /*
  * Brikken: AS3933 LF wake-up receiver over SPI
  *
- * VIKTIG: AS3933 har AKTIV-HOY chip select. Derfor GPIO_ACTIVE_HIGH
- * pa cs-gpios. Zephyr antar aktiv-lav som standard, og med feil
- * polaritet svarer brikken bare med nuller.
+ * ROTARSAKEN til at SPI ikke virket: konsollen (uart20) sitter pa
+ * P1.04-P1.07, de samme pinnene SPI skulle bruke. UART-en drev
+ * P1.06, sa MISO aldri kunne lese noe fra AS3933.
  *
- * Pinnevalg: UART1 (P1.04-P1.07) ma kobles fra i Board Configurator
- * for disse kan brukes som GPIO. UART0 (P0.00-P0.03) beholdes til
- * konsollen.
+ * Losning: konsollen flyttes til uart30 pa P0.00-P0.03, og uart20
+ * slas av helt. Da frigjores P1.04-P1.07.
  *
- * Ledige alternativer hvis UART1 ikke frigjores: P1.11, P1.12,
- * P2.06, P2.08, P2.10.
+ * MERK: konsollen bytter COM-port. Den gar fra COM5 til COM4
+ * (serial port 0 i stedet for 1). VCOM1 kan sta frakoblet i
+ * Board Configurator.
+ *
+ * AS3933 har AKTIV-HOY chip select - derfor GPIO_ACTIVE_HIGH pa
+ * cs-gpios, og SPI_CS_ACTIVE_HIGH i koden.
  */
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	chosen {
+		zephyr,console = &uart30;
+		zephyr,shell-uart = &uart30;
+	};
+};
+
+/* Frigjor P1.04-P1.07 */
+&uart20 {
+	status = "disabled";
+};
+
+&uart30 {
+	status = "okay";
+	current-speed = <115200>;
+};
 
 &pinctrl {
 	spi21_default: spi21_default {
@@ -51,10 +71,6 @@
 };
 
 / {
-	aliases {
-		as3933-wake = &as3933_wake;
-	};
-
 	as3933_gpio {
 		compatible = "gpio-keys";
 

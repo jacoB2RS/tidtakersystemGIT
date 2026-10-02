@@ -1,85 +1,154 @@
 /*
- * Slojfetest for P1.04 - P1.07
+ * AS3933 SPI-diagnose, versjon 2
  *
- * Tester om nRF54L15 faktisk kan drive og lese disse pinnene, eller om
- * de analoge svitsjene mot debuggeren (UART1) holder dem fast.
+ * Nytt siden v1: SPI_CS_ACTIVE_HIGH er lagt til. AS3933 har aktiv-hoy
+ * chip select, og i Zephyr ma BADE devicetree (GPIO_ACTIVE_HIGH pa
+ * cs-gpios) og koden (SPI_CS_ACTIVE_HIGH, BIT(14)) si det.
  *
- * KOBLING: ta AS3933 helt ut. Sett EN jumper direkte mellom
- *   P1.05  og  P1.06
- * Ingenting annet.
+ * Prover alle fire SPI-modusene og leser R5 og R6 i hver.
+ * Default er R5=0x69 og R6=0x96.
  *
- * Programmet driver P1.05 hoy og lav, og leser P1.06.
- * Folger P1.06 etter, er pinnene i orden.
+ * Etterpa kjorer den kontinuerlig SPI-trafikk hvert halve sekund,
+ * sa signalene kan males med skop uten a mase med reset-timing:
+ *   P1.07 CS   - skal ga HOY under hver overforing
+ *   P1.04 SCL  - klokkeburst, 16 pulser per lesing
+ *   P1.05 SDI  - kommandoen ut av nRF
+ *   P1.06 SDO  - svaret fra AS3933
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/printk.h>
 
-#define PORT DT_NODELABEL(gpio1)
+#define AS3933_MODE_WRITE 0x00
+#define AS3933_MODE_READ  0x40
+#define AS3933_MODE_CMD   0xC0
 
-#define UT_PIN  5   /* P1.05 */
-#define INN_PIN 6   /* P1.06 */
+#define AS3933_CMD_PRESET_DEFAULT 0x04
+
+#define SPI_BASE (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_CS_ACTIVE_HIGH)
+
+/* Ikke const - vi endrer operation underveis */
+static struct spi_dt_spec as3933 =
+	SPI_DT_SPEC_GET(DT_NODELABEL(as3933), SPI_BASE, 0);
+
+static const struct gpio_dt_spec wake =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(as3933_wake), gpios);
+
+static int les(uint8_t reg, uint8_t *ut)
+{
+	uint8_t tx[2] = { AS3933_MODE_READ | (reg & 0x3F), 0x00 };
+	uint8_t rx[2] = { 0, 0 };
+
+	const struct spi_buf tx_buf = { .buf = tx, .len = 2 };
+	const struct spi_buf rx_buf = { .buf = rx, .len = 2 };
+	const struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
+	const struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
+
+	int err = spi_transceive_dt(&as3933, &tx_set, &rx_set);
+
+	if (err == 0) {
+		*ut = rx[1];
+	}
+	return err;
+}
+
+static int kommando(uint8_t kode)
+{
+	uint8_t tx[1] = { AS3933_MODE_CMD | (kode & 0x3F) };
+	const struct spi_buf tx_buf = { .buf = tx, .len = 1 };
+	const struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
+
+	return spi_write_dt(&as3933, &tx_set);
+}
+
+static void sett_modus(int m)
+{
+	uint32_t op = SPI_BASE;
+
+	if (m & 1) {
+		op |= SPI_MODE_CPHA;
+	}
+	if (m & 2) {
+		op |= SPI_MODE_CPOL;
+	}
+	as3933.config.operation = op;
+}
 
 int main(void)
 {
-	const struct device *p1 = DEVICE_DT_GET(PORT);
-	int feil = 0;
+	uint8_t r5, r6;
+	int err;
+	int traff = -1;
 
 	k_msleep(500);
 
-	printk("\n\n=== Slojfetest P1.05 -> P1.06 ===\n\n");
+	printk("\n\n=== AS3933 SPI-diagnose v2 (CS aktiv hoy) ===\n\n");
 
-	if (!device_is_ready(p1)) {
-		printk("FEIL: gpio1 er ikke klar\n");
+	if (!spi_is_ready_dt(&as3933)) {
+		printk("FEIL: SPI-bussen er ikke klar\n");
 		return -ENODEV;
 	}
 
-	gpio_pin_configure(p1, UT_PIN, GPIO_OUTPUT_LOW);
-	gpio_pin_configure(p1, INN_PIN, GPIO_INPUT);
+	if (gpio_is_ready_dt(&wake)) {
+		gpio_pin_configure_dt(&wake, GPIO_INPUT);
+	}
 
-	for (int i = 0; i < 4; i++) {
-		int forventet = i % 2;
+	printk("Modus  R5    R6    (forventet 0x69 0x96)\n");
+	printk("-------------------------------------------\n");
 
-		gpio_pin_set(p1, UT_PIN, forventet);
-		k_msleep(50);
+	for (int m = 0; m < 4; m++) {
+		sett_modus(m);
 
-		int lest = gpio_pin_get(p1, INN_PIN);
+		kommando(AS3933_CMD_PRESET_DEFAULT);
+		k_msleep(20);
 
-		printk("P1.05 satt %d  ->  P1.06 leste %d   %s\n",
-		       forventet, lest,
-		       lest == forventet ? "ok" : "AVVIK");
+		r5 = 0xAA;
+		r6 = 0xAA;
 
-		if (lest != forventet) {
-			feil++;
+		err = les(5, &r5);
+		if (err) {
+			printk("  %d    spi_transceive ga %d\n", m, err);
+			continue;
+		}
+		les(6, &r6);
+
+		printk("  %d    0x%02X  0x%02X  %s\n", m, r5, r6,
+		       (r5 == 0x69 && r6 == 0x96) ? "<-- TREFF" : "");
+
+		if (r5 == 0x69 && r6 == 0x96) {
+			traff = m;
 		}
 	}
 
 	printk("\n");
 
-	if (feil == 0) {
-		printk("Pinnene virker. nRF-siden er i orden.\n");
-		printk("Feilen ligger da i AS3933 eller i selve SPI-oppsettet.\n");
+	if (traff >= 0) {
+		printk("SPI virker i modus %d.\n", traff);
+		printk("Sett den fast i main.c og ga videre.\n\n");
+		sett_modus(traff);
 	} else {
-		printk("%d avvik.\n\n", feil);
-		printk("P1.06 folger ikke P1.05. Mulige arsaker:\n");
-		printk("  1. Jumperen mellom P1.05 og P1.06 mangler kontakt\n");
-		printk("  2. UART1 er fortsatt tilkoblet debuggeren\n");
-		printk("     -> koble den fra i Board Configurator\n");
-		printk("  3. Feil pinner paa headeren\n");
+		printk("Ingen modus traff.\n\n");
+		printk("Kjorer na kontinuerlig lesing i modus 1.\n");
+		printk("Skop, i denne rekkefolgen:\n");
+		printk("  P1.04 SCL  - kommer det klokkeburst?\n");
+		printk("  P1.07 CS   - gar den HOY under bursten?\n");
+		printk("  P1.05 SDI  - ser du 0x45 sendt ut?\n");
+		printk("  P1.06 SDO  - svarer brikka noe i det hele tatt?\n\n");
+		sett_modus(1);
 	}
 
-	/* Fortsett a veksle, sa det kan males med multimeter paa P1.05.
-	 * 1 Hz: multimeteret vil vise rundt 1,65 V i snitt.
-	 */
-	printk("\nVeksler na P1.05 hvert sekund. Mal med multimeter.\n");
-
+	/* Kontinuerlig trafikk, lett a probe */
 	while (1) {
-		gpio_pin_toggle(p1, UT_PIN);
-		printk("P1.05=%d  P1.06=%d\n",
-		       gpio_pin_get(p1, UT_PIN),
-		       gpio_pin_get(p1, INN_PIN));
-		k_msleep(1000);
+		les(5, &r5);
+		les(6, &r6);
+
+		printk("R5=0x%02X  R6=0x%02X  WAKE=%d\n",
+		       r5, r6, gpio_pin_get_dt(&wake));
+
+		k_msleep(500);
 	}
 
 	return 0;
