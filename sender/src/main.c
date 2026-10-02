@@ -25,7 +25,7 @@
 #define MODE_BURST        2
 #define MODE_SVEIP        3
 
-#define MODE MODE_BURST
+#define MODE MODE_KONTINUERLIG
 
 /* 16 MHz / 128 = 125,0 kHz */
 #define PERIODE_125K_NS 8000u
