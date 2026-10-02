@@ -1,19 +1,19 @@
 /*
- * AS3933 SPI-diagnose, versjon 2
+ * Brikken: AS3933 feltstyrkemaler
  *
- * Nytt siden v1: SPI_CS_ACTIVE_HIGH er lagt til. AS3933 har aktiv-hoy
- * chip select, og i Zephyr ma BADE devicetree (GPIO_ACTIVE_HIGH pa
- * cs-gpios) og koden (SPI_CS_ACTIVE_HIGH, BIT(14)) si det.
+ * SPI-modus 1 (CPOL=0, CPHA=1). Bekreftet mot R5=0x69 / R6=0x96.
+ * CS er aktiv hoy - bade GPIO_ACTIVE_HIGH i overlay og
+ * SPI_CS_ACTIVE_HIGH her.
  *
- * Prover alle fire SPI-modusene og leser R5 og R6 i hver.
- * Default er R5=0x69 og R6=0x96.
+ * Oppsett for forste feltmaling:
+ *   R1 = 0x00  intern RC-oscillator (ingen krystall montert),
+ *              ingen monstergjenkjenning -> WAKE gar hoy pa
+ *              ren baerebolge alene
+ *   R2 = 0x20  +3 dB forsterkning (G_BOOST)
+ *   R0 = 0x0E  alle tre kanaler aktive (fabrikkverdi)
  *
- * Etterpa kjorer den kontinuerlig SPI-trafikk hvert halve sekund,
- * sa signalene kan males med skop uten a mase med reset-timing:
- *   P1.07 CS   - skal ga HOY under hver overforing
- *   P1.04 SCL  - klokkeburst, 16 pulser per lesing
- *   P1.05 SDI  - kommandoen ut av nRF
- *   P1.06 SDO  - svaret fra AS3933
+ * RSSI er peak-hold, sa reset_RSSI kalles hver runde for at
+ * avlesningen skal folge feltet i sanntid.
  */
 
 #include <zephyr/kernel.h>
@@ -26,13 +26,23 @@
 #define AS3933_MODE_READ  0x40
 #define AS3933_MODE_CMD   0xC0
 
-#define AS3933_CMD_PRESET_DEFAULT 0x04
+#define CMD_CLEAR_WAKE     0x00
+#define CMD_RESET_RSSI     0x01
+#define CMD_PRESET_DEFAULT 0x04
 
-#define SPI_BASE (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_CS_ACTIVE_HIGH)
+#define REG_R0     0
+#define REG_R1     1
+#define REG_R2     2
+#define REG_RSSI1 10
+#define REG_RSSI2 11
+#define REG_RSSI3 12
 
-/* Ikke const - vi endrer operation underveis */
-static struct spi_dt_spec as3933 =
-	SPI_DT_SPEC_GET(DT_NODELABEL(as3933), SPI_BASE, 0);
+/* Modus 1: CPHA satt, CPOL av */
+#define SPI_OPER (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | \
+		  SPI_CS_ACTIVE_HIGH | SPI_MODE_CPHA)
+
+static const struct spi_dt_spec as3933 =
+	SPI_DT_SPEC_GET(DT_NODELABEL(as3933), SPI_OPER, 0);
 
 static const struct gpio_dt_spec wake =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(as3933_wake), gpios);
@@ -55,6 +65,15 @@ static int les(uint8_t reg, uint8_t *ut)
 	return err;
 }
 
+static int skriv(uint8_t reg, uint8_t verdi)
+{
+	uint8_t tx[2] = { AS3933_MODE_WRITE | (reg & 0x3F), verdi };
+	const struct spi_buf tx_buf = { .buf = tx, .len = 2 };
+	const struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
+
+	return spi_write_dt(&as3933, &tx_set);
+}
+
 static int kommando(uint8_t kode)
 {
 	uint8_t tx[1] = { AS3933_MODE_CMD | (kode & 0x3F) };
@@ -64,91 +83,83 @@ static int kommando(uint8_t kode)
 	return spi_write_dt(&as3933, &tx_set);
 }
 
-static void sett_modus(int m)
+/* Enkel sojlegraf, 0-31 */
+static void soyle(uint8_t v)
 {
-	uint32_t op = SPI_BASE;
-
-	if (m & 1) {
-		op |= SPI_MODE_CPHA;
+	for (int i = 0; i < 32; i++) {
+		printk("%c", i < v ? '#' : '.');
 	}
-	if (m & 2) {
-		op |= SPI_MODE_CPOL;
-	}
-	as3933.config.operation = op;
 }
 
 int main(void)
 {
-	uint8_t r5, r6;
-	int err;
-	int traff = -1;
+	uint8_t v;
 
 	k_msleep(500);
 
-	printk("\n\n=== AS3933 SPI-diagnose v2 (CS aktiv hoy) ===\n\n");
+	printk("\n\n=== AS3933 feltstyrkemaler ===\n\n");
 
 	if (!spi_is_ready_dt(&as3933)) {
 		printk("FEIL: SPI-bussen er ikke klar\n");
 		return -ENODEV;
 	}
 
-	if (gpio_is_ready_dt(&wake)) {
-		gpio_pin_configure_dt(&wake, GPIO_INPUT);
+	if (!gpio_is_ready_dt(&wake)) {
+		printk("FEIL: WAKE-pinnen er ikke klar\n");
+		return -ENODEV;
 	}
+	gpio_pin_configure_dt(&wake, GPIO_INPUT);
 
-	printk("Modus  R5    R6    (forventet 0x69 0x96)\n");
-	printk("-------------------------------------------\n");
+	/* Kjent utgangspunkt */
+	kommando(CMD_PRESET_DEFAULT);
+	k_msleep(20);
 
-	for (int m = 0; m < 4; m++) {
-		sett_modus(m);
-
-		kommando(AS3933_CMD_PRESET_DEFAULT);
-		k_msleep(20);
-
-		r5 = 0xAA;
-		r6 = 0xAA;
-
-		err = les(5, &r5);
-		if (err) {
-			printk("  %d    spi_transceive ga %d\n", m, err);
-			continue;
-		}
-		les(6, &r6);
-
-		printk("  %d    0x%02X  0x%02X  %s\n", m, r5, r6,
-		       (r5 == 0x69 && r6 == 0x96) ? "<-- TREFF" : "");
-
-		if (r5 == 0x69 && r6 == 0x96) {
-			traff = m;
-		}
-	}
-
-	printk("\n");
-
-	if (traff >= 0) {
-		printk("SPI virker i modus %d.\n", traff);
-		printk("Sett den fast i main.c og ga videre.\n\n");
-		sett_modus(traff);
+	/* Bekreft at SPI fortsatt snakker */
+	les(5, &v);
+	if (v != 0x69) {
+		printk("ADVARSEL: R5 leste 0x%02X, forventet 0x69\n", v);
+		printk("SPI svarer ikke riktig. Sjekk oppkoblingen.\n\n");
 	} else {
-		printk("Ingen modus traff.\n\n");
-		printk("Kjorer na kontinuerlig lesing i modus 1.\n");
-		printk("Skop, i denne rekkefolgen:\n");
-		printk("  P1.04 SCL  - kommer det klokkeburst?\n");
-		printk("  P1.07 CS   - gar den HOY under bursten?\n");
-		printk("  P1.05 SDI  - ser du 0x45 sendt ut?\n");
-		printk("  P1.06 SDO  - svarer brikka noe i det hele tatt?\n\n");
-		sett_modus(1);
+		printk("SPI ok (R5 = 0x69)\n");
 	}
 
-	/* Kontinuerlig trafikk, lett a probe */
+	/* Intern RC, ingen monstergjenkjenning */
+	skriv(REG_R1, 0x00);
+	/* +3 dB forsterkning */
+	skriv(REG_R2, 0x20);
+	k_msleep(20);
+
+	les(REG_R0, &v);
+	printk("R0 = 0x%02X  (kanaler aktive)\n", v);
+	les(REG_R1, &v);
+	printk("R1 = 0x%02X  (0x00 = RC-osc, frekvensdeteksjon)\n", v);
+	les(REG_R2, &v);
+	printk("R2 = 0x%02X  (0x20 = gain boost)\n\n", v);
+
+	printk("Start senderen og hold spolen naer sendespolen.\n");
+	printk("k1 er kanalen med spolen. k2 og k3 er ikke koblet.\n\n");
+
 	while (1) {
-		les(5, &r5);
-		les(6, &r6);
+		uint8_t r1 = 0, r2 = 0, r3 = 0;
 
-		printk("R5=0x%02X  R6=0x%02X  WAKE=%d\n",
-		       r5, r6, gpio_pin_get_dt(&wake));
+		kommando(CMD_RESET_RSSI);
+		k_msleep(100);
 
-		k_msleep(500);
+		les(REG_RSSI1, &r1);
+		les(REG_RSSI2, &r2);
+		les(REG_RSSI3, &r3);
+
+		r1 &= 0x1F;
+		r2 &= 0x1F;
+		r3 &= 0x1F;
+
+		printk("k1=%2u ", r1);
+		soyle(r1);
+		printk("   k2=%2u k3=%2u  WAKE=%d\n",
+		       r2, r3, gpio_pin_get_dt(&wake));
+
+		kommando(CMD_CLEAR_WAKE);
+		k_msleep(300);
 	}
 
 	return 0;
