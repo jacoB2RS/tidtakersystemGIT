@@ -31,7 +31,7 @@
 #define PERIODE_125K_NS 8000u
 
 #define BURST_MS 20
-#define PAUSE_MS 2000
+#define PAUSE_MS 500
 
 /*
  * Sveip. N er antall klokketikk pa 16 MHz: f = 16 MHz / N.
