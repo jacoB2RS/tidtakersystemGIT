@@ -1,19 +1,13 @@
 /*
  * Brikken: AS3933 LF wake-up receiver over SPI
  *
- * ROTARSAKEN til at SPI ikke virket: konsollen (uart20) sitter pa
- * P1.04-P1.07, de samme pinnene SPI skulle bruke. UART-en drev
- * P1.06, sa MISO aldri kunne lese noe fra AS3933.
+ * Som for, men med DAT lagt til pa P1.12.
  *
- * Losning: konsollen flyttes til uart30 pa P0.00-P0.03, og uart20
- * slas av helt. Da frigjores P1.04-P1.07.
+ * Konsollen ligger pa uart30 (COM4). uart20 ma vaere av, ellers
+ * stjeler den P1.04-P1.07 fra SPI.
  *
- * MERK: konsollen bytter COM-port. Den gar fra COM5 til COM4
- * (serial port 0 i stedet for 1). VCOM1 kan sta frakoblet i
- * Board Configurator.
- *
- * AS3933 har AKTIV-HOY chip select - derfor GPIO_ACTIVE_HIGH pa
- * cs-gpios, og SPI_CS_ACTIVE_HIGH i koden.
+ * AS3933 har AKTIV-HOY chip select - GPIO_ACTIVE_HIGH pa cs-gpios,
+ * og SPI_CS_ACTIVE_HIGH i koden.
  */
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
@@ -77,6 +71,15 @@
 		as3933_wake: wake {
 			gpios = <&gpio1 11 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
 			label = "AS3933 WAKE";
+		};
+
+		/* NYTT: DAT, AS3933 pin 15 -> P1.12.
+		 * Ingen pull. Vil vi se om pinnen drives i det hele tatt,
+		 * ma vi ikke legge en pull-motstand som maskerer svaret.
+		 */
+		as3933_dat: dat {
+			gpios = <&gpio1 12 GPIO_ACTIVE_HIGH>;
+			label = "AS3933 DAT";
 		};
 	};
 };
