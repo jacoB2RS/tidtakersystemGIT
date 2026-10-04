@@ -1,31 +1,42 @@
 /*
- * Brikken: test av DAT-pinnen pa AS3933
+ * Brikken: folger DAT og WAKE i sanntid
  *
- * Hensikt: finne ut om DAT (pin 15) gjor noe i ren frekvens-
- * deteksjonsmodus, altsa uten monstergjenkjenning. Hele
- * kantmetoden (metode 3) hviler pa at DAT folger feltet, sa
- * dette ma avklares for vi bygger noe mer.
+ * Forrige test viste at DAT lever, men at den ser ut til a gi en
+ * KORT PULS ved deteksjon i stedet for a ligge hoy sa lenge feltet
+ * star pa. Det avgjorende sporsmalet er derfor:
  *
- * Kobling, i tillegg til det som allerede star:
- *   AS3933 pin 15 (DAT) -> P1.12
+ *   Faller DAT og WAKE av seg selv nar feltet forsvinner,
+ *   eller blir de laast til vi rydder med clear_wake?
  *
- * Senderen skal sta i MODE_KONTINUERLIG under testen. Med burst
- * folger DAT burstene, ikke feltet, og da maler vi feil ting.
+ * Kantmetoden trenger BEGGE flanker: inn OG ut. Faller de ikke av
+ * seg selv, har vi ingen utgangsflanke a tidsstemple.
  *
- * Tre mulige utfall:
- *   A) niva=0 hele tiden, flanker=0 bade med og uten felt
- *        -> DAT er dod i denne modusen. Kantmetoden ma bruke
- *           RSSI-terskel i programvare i stedet, eller vi ma
- *           sla pa monstergjenkjenning.
- *   B) niva folger feltet: 0 uten, 1 med (eller omvendt)
- *        -> perfekt. Da er DAT en ren feltindikator og kan
- *           kobles rett til GPIOTE for maskinvare-tidsstempling.
- *   C) flanker teller raskt nar feltet star pa
- *        -> DAT gir ut demodulert data/klokke. Da er den fortsatt
- *           brukbar: "det kommer flanker" = "felt til stede", men
- *           vi ma filtrere i stedet for a se pa ett enkelt niva.
+ * Denne versjonen rydder derfor IKKE med clear_wake (sett
+ * RYDD_HVERT_SEKUND til 1 hvis dere vil sammenligne).
  *
- * Noter hvilket utfall dere far, og ved hvilken avstand.
+ * Utskriften er en tekst-skop: hver linje dekker 500 ms, hvert
+ * tegn 10 ms.
+ *   '.'  lav hele tiden
+ *   '#'  hoy hele tiden
+ *   '-'  vekslet i lopet av de 10 ms
+ *
+ * PROSEDYRE
+ *   1. Start med spolen langt unna, senderen kontinuerlig pa.
+ *      Begge rader skal vaere rene prikker.
+ *   2. For spolen rolig inn til 2 cm, hold i 2 sekunder,
+ *      og trekk den rolig ut igjen.
+ *   3. Se pa hva som skjer NAR DU TREKKER DEN UT.
+ *
+ * Tre utfall:
+ *   A) begge rader gar tilbake til prikker nar spolen trekkes ut
+ *        -> vi har bade inn- og utflanke. Metode 3 kan bygges.
+ *   B) radene blir staende '#' etter at spolen er ute
+ *        -> laast. Utflanken ma hentes et annet sted: enten
+ *           programvare-terskel pa RSSI, eller modulert baerebolge
+ *           slik at DAT gir et pulstog mens feltet star pa.
+ *   C) korte pulser med jevne mellomrom mens spolen star stille
+ *        -> en automatisk timeout (R7 T_OUT) rearmer kretsen.
+ *           Da ma T_OUT slas av for noe av dette gir mening.
  */
 
 #include <zephyr/kernel.h>
@@ -34,14 +45,13 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/printk.h>
 
-/* ---- samme skruer som i brikke-tune ---- */
+/* Sett til 1 for a sammenligne med rydding en gang i sekundet */
+#define RYDD_HVERT_SEKUND 0
 
-#define GAIN_REDUKSJON 0x09   /* R4<3:0>, -16 dB */
-#define DEMPER_PA      1      /* R1<4> ATT_ON */
-#define DEMPE_RES      1      /* R4<5:4> */
-#define TOLERANSE      2      /* R2<1:0>, 16+/-2 strammest */
-
-/* ---- resten ---- */
+#define GAIN_REDUKSJON 0x09
+#define DEMPER_PA      1
+#define DEMPE_RES      1
+#define TOLERANSE      2
 
 #define AS3933_MODE_WRITE 0x00
 #define AS3933_MODE_READ  0x40
@@ -52,10 +62,6 @@
 #define CMD_CLEAR_FALSE    0x03
 #define CMD_PRESET_DEFAULT 0x04
 #define CMD_CALIB_RCO_LC   0x05
-
-#define REG_RSSI1 10
-#define REG_RSSI2 11
-#define REG_RSSI3 12
 
 #define SPI_OPER (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | \
 		  SPI_CS_ACTIVE_HIGH | SPI_MODE_CPHA)
@@ -68,24 +74,6 @@ static const struct gpio_dt_spec wake =
 
 static const struct gpio_dt_spec dat =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(as3933_dat), gpios);
-
-static struct gpio_callback wake_cb;
-static struct gpio_callback dat_cb;
-
-static volatile uint32_t wake_antall;
-static volatile uint32_t dat_flanker;
-
-static void wake_handler(const struct device *dev,
-			 struct gpio_callback *cb, uint32_t pins)
-{
-	wake_antall++;
-}
-
-static void dat_handler(const struct device *dev,
-			struct gpio_callback *cb, uint32_t pins)
-{
-	dat_flanker++;
-}
 
 static int les(uint8_t reg, uint8_t *ut)
 {
@@ -123,40 +111,42 @@ static int kommando(uint8_t kode)
 	return spi_write_dt(&as3933, &tx_set);
 }
 
-static void soyle(uint8_t v)
-{
-	for (int i = 0; i < 32; i++) {
-		printk("%c", i < v ? '#' : '.');
-	}
-}
+/* 500 prover a 1 ms = ett vindu pa 500 ms */
+#define PROVER 500
+#define PER_TEGN 10
 
-/*
- * Les DAT-nivaet mange ganger pa rad og tell hvor stor andel som
- * var hoy. Skiller et fast niva fra en pinne som veksler for fort
- * til at ett enkelt oyeblikksbilde sier noe.
- */
-static uint32_t dat_andel_hoy(void)
-{
-	uint32_t hoy = 0;
+static uint8_t prov_dat[PROVER];
+static uint8_t prov_wake[PROVER];
 
-	for (int i = 0; i < 1000; i++) {
-		if (gpio_pin_get_dt(&dat) == 1) {
-			hoy++;
+static void tegn_rad(const char *navn, const uint8_t *p)
+{
+	printk("%s ", navn);
+
+	for (int i = 0; i < PROVER; i += PER_TEGN) {
+		int sum = 0;
+
+		for (int j = 0; j < PER_TEGN; j++) {
+			sum += p[i + j];
 		}
-		k_busy_wait(10);   /* 1000 x 10 us = 10 ms vindu */
+
+		if (sum == 0) {
+			printk(".");
+		} else if (sum == PER_TEGN) {
+			printk("#");
+		} else {
+			printk("-");
+		}
 	}
-	return hoy / 10;           /* prosent */
+	printk("\n");
 }
 
 int main(void)
 {
 	uint8_t v;
-	uint32_t forrige_wake = 0;
-	uint32_t forrige_dat = 0;
 
 	k_msleep(500);
 
-	printk("\n\n=== AS3933: test av DAT-pinnen ===\n\n");
+	printk("\n\n=== AS3933: folger DAT og WAKE ===\n\n");
 
 	if (!spi_is_ready_dt(&as3933) || !gpio_is_ready_dt(&wake) ||
 	    !gpio_is_ready_dt(&dat)) {
@@ -165,15 +155,7 @@ int main(void)
 	}
 
 	gpio_pin_configure_dt(&wake, GPIO_INPUT);
-	gpio_pin_interrupt_configure_dt(&wake, GPIO_INT_EDGE_RISING);
-	gpio_init_callback(&wake_cb, wake_handler, BIT(wake.pin));
-	gpio_add_callback(wake.port, &wake_cb);
-
-	/* DAT: begge flanker, slik at vi fanger opp enhver aktivitet */
 	gpio_pin_configure_dt(&dat, GPIO_INPUT);
-	gpio_pin_interrupt_configure_dt(&dat, GPIO_INT_EDGE_BOTH);
-	gpio_init_callback(&dat_cb, dat_handler, BIT(dat.pin));
-	gpio_add_callback(dat.port, &dat_cb);
 
 	kommando(CMD_PRESET_DEFAULT);
 	k_msleep(20);
@@ -196,44 +178,35 @@ int main(void)
 	kommando(CMD_CLEAR_WAKE);
 	k_msleep(20);
 
-	for (uint8_t r = 0; r <= 8; r++) {
-		les(r, &v);
-		printk("R%-2u = 0x%02X\n", r, v);
-	}
+	/* R7 styrer blant annet automatisk timeout pa vekkesignalet.
+	 * Noter verdien og slaa den opp i databladet - den avgjor om
+	 * kretsen rearmer seg selv uten at vi ber om det.
+	 */
+	les(7, &v);
+	printk("R7 = 0x%02X  <- sjekk T_OUT-feltet i databladet\n", v);
 
-	printk("\nSENDEREN SKAL STA KONTINUERLIG.\n");
-	printk("Kjor forst uten felt, sa med spolen 2 cm unna.\n");
-	printk("Se pa dat-kolonnene: niva, %% hoy, og flanker.\n\n");
+	printk("rydding: %s\n\n",
+	       RYDD_HVERT_SEKUND ? "clear_wake hvert sekund" : "AV");
+
+	printk("Hvert tegn = 10 ms. '.' lav  '#' hoy  '-' vekslet\n");
+	printk("For spolen inn, hold, og trekk den ut igjen.\n\n");
 
 	while (1) {
-		uint8_t r1 = 0, r2 = 0, r3 = 0;
-		uint32_t w, d, andel;
-		int niva;
+		static uint32_t vindu;
 
-		kommando(CMD_RESET_RSSI);
-		k_msleep(600);
+		for (int i = 0; i < PROVER; i++) {
+			prov_dat[i] = gpio_pin_get_dt(&dat) ? 1 : 0;
+			prov_wake[i] = gpio_pin_get_dt(&wake) ? 1 : 0;
+			k_busy_wait(1000);
+		}
 
-		les(REG_RSSI1, &r1);
-		les(REG_RSSI2, &r2);
-		les(REG_RSSI3, &r3);
+		printk("\n[%4u]\n", vindu++);
+		tegn_rad("DAT ", prov_dat);
+		tegn_rad("WAKE", prov_wake);
 
-		niva = gpio_pin_get_dt(&dat);
-		andel = dat_andel_hoy();
-
-		w = wake_antall;
-		d = dat_flanker;
-
-		printk("k1=%2u ", r1 & 0x1F);
-		soyle(r1 & 0x1F);
-		printk("  k2=%2u k3=%2u | dat niva=%d %3u%% flanker=%u (+%u) | irq=%u %s\n",
-		       r2 & 0x1F, r3 & 0x1F,
-		       niva, andel, d, d - forrige_dat,
-		       w, w != forrige_wake ? "<-- WAKE" : "");
-
-		forrige_wake = w;
-		forrige_dat = d;
-
-		kommando(CMD_CLEAR_WAKE);
+		if (RYDD_HVERT_SEKUND && (vindu % 2) == 0) {
+			kommando(CMD_CLEAR_WAKE);
+		}
 	}
 
 	return 0;
