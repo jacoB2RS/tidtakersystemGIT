@@ -33,7 +33,11 @@
 #define BEKREFT   3	/* malinger pa rad for en trigging godtas */
 
 #define N    6000	/* ringbuffer, ca 1,17 sekund */
-#define POST 4500	/* malinger etter trigging */
+#define POST 4500	/* ovre grense for malinger etter trigging */
+#define RO_KRAV 600	/* malinger under terskel for opptaket avsluttes */
+
+#define MIN_SPENN      8	/* trinn mellom gulv og topp */
+#define MIN_VARIGHET_US 5000	/* kortere passering finnes ikke */
 
 /* Dempet oppsett. Gir gulv 9 og 23 pa 2 cm = 14 trinn a jobbe med.
  * Uten demping blir gulvet 15-19 og spennet mindre.
@@ -302,8 +306,9 @@ static void analyser(struct resultat *r)
 	r->topp = topp;
 	r->gulv = gulv;
 
-	if (topp - gulv < 6) {
-		printk("for svakt spenn: gulv %u topp %u\n", gulv, topp);
+	if (topp - gulv < MIN_SPENN) {
+		printk("forkastet: spenn %u trinn (gulv %u, topp %u)\n",
+		       topp - gulv, gulv, topp);
 		return;
 	}
 
@@ -333,6 +338,12 @@ static void analyser(struct resultat *r)
 
 	r->t1 = kryss(i1, terskel);
 	r->t2 = kryss(i2, terskel);
+
+	if (r->t2 - r->t1 < MIN_VARIGHET_US) {
+		printk("forkastet: varighet %u us\n", r->t2 - r->t1);
+		return;
+	}
+
 	r->midt = (r->t1 + r->t2) / 2;
 	r->avvik = (int32_t)(r->midt - t[i_topp]);
 	r->gyldig = true;
@@ -395,6 +406,7 @@ int main(void)
 	uint32_t teller = 0;
 	uint32_t igjen = 0;
 	uint32_t pa_rad = 0;
+	uint32_t ro = 0;
 	bool trigget = false;
 	uint8_t maks = 0, min = 31;
 	int err;
@@ -457,7 +469,24 @@ int main(void)
 				maks = 0;
 				min = 31;
 			}
-		} else if (--igjen == 0) {
+			continue;
+		}
+
+		/*
+		 * Opptaket avsluttes nar feltet har vaert borte i RO_KRAV
+		 * malinger, ikke etter et fast etterlop. Et fast etterlop
+		 * pa 4500 malinger er 878 ms, og da er hendelsen nesten et
+		 * sekund gammel nar pakken gar ut.
+		 */
+		if (m < TRIGGER - 2) {
+			ro++;
+		} else {
+			ro = 0;
+		}
+
+		igjen--;
+
+		if (ro >= RO_KRAV || igjen == 0) {
 			struct resultat r;
 
 			for (uint32_t k = 0; k < N; k++) {
@@ -476,6 +505,7 @@ int main(void)
 			trigget = false;
 			teller = 0;
 			pa_rad = 0;
+			ro = 0;
 			maks = 0;
 			min = 31;
 		}
