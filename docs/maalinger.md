@@ -105,6 +105,29 @@ Feltet faller som 1/r³, så 1000× bedre følsomhet gir grovt 10× rekkevidde.
 2. Avstemt mottaker (kommer med 3D-spole + 680 pF)
 3. Høyere drivspenning på TC4427A (krever C med høyere spenningstål)
 
+## 2026-10-04 — metode 3 verifisert for hånd
+
+Oppsett: sender kontinuerlig (MODE_KONTINUERLIG), brikke med
+AS3933 på full demping (GR 0x09, ATT_ON, D_RES 1), RSSI lest
+i tett løkke, 195 µs per måling.
+
+Terskel settes etter opptaket, midt mellom gulv og topp.
+Toppen regnes som midten av platået — ikke første måling som
+når maksverdien. Den feilen ga +17 ms systematisk bias.
+
+| # | Topp | Platå | Varighet | Midt − topp |
+|---|------|-------|----------|-------------|
+| 1 | 19   | 643   | 306,1 ms | −8414 µs    |
+| 2 | 23   | 213   | 346,3 ms | −84 µs      |
+| 3 | 21   | 440   | 335,0 ms | −697 µs     |
+
+Avviket følger platåbredden. Usikkerheten ligger i toppestimatet,
+ikke i flankemidtpunktet.
+
+Skalert til 36 ms passering: 0,01–1 ms.
+
+Regel: mål aldri tid på toppen av kurven. Flankene er skarpe,
+toppen er flat.
 ---
 
 ## TODO
