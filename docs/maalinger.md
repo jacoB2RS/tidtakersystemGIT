@@ -129,6 +129,40 @@ Skalert til 36 ms passering: 0,01–1 ms.
 Regel: mål aldri tid på toppen av kurven. Flankene er skarpe,
 toppen er flat.
 ---
+## 2026-10-07 — ESB-link og tidsstempling på porten
+
+Steg 1: esb_ptx/esb_prx urørt mellom to DK-er. Sekvensteller i
+byte 1 gikk 0x86–0xAA uten hopp. ESB virker på nRF54L15 i
+NCS v3.4.1; de kjente feilene i klokkestyring og ESB-timing er
+inne. CONFIG_ESB_CLOCK_INIT=y starter HF-klokka.
+
+Steg 2: brikka sender varighet, alder, topp, gulv og
+symmetriavvik i en 16-byte pakke. Null tapte pakker.
+
+Steg 3: porten tidsstempler mottaket med k_uptime_ticks
+(32768 Hz, 30,5 us) i avbruddsrutinen og regner
+passering = mottak - alder. Verifisert mot stoppeklokke.
+
+Restfeil, målt for hånd:
+| Bevegelse        | Varighet | Avvik      | Andel  |
+|------------------|----------|------------|--------|
+| sakte, stopper   | 150 ms   | +26 ms     | +18 %  |
+| motsatt retning  | 147 ms   | +12 ms     |  +8 %  |
+| rask, gjennomfor |  76 ms   | -5 til -8 ms | -9 %  |
+
+Fortegnet snur med bevegelsen, ikke med retningen. Restfeilen er
+altså kinematikk, ikke kode. Å snu retningen snur ikke
+fartsprofilen - hånda starter og stopper uansett vei.
+
+Feil funnet og rettet i dag:
+- Toppen ble søkt i hele ringbufferet. To passeringer innenfor
+  1,17 s som nådde samme toppverdi ga et "platåsenter" i dalen
+  mellom dem. Analysen ankrer nå i siste passering.
+- teller ble nullstilt etter hvert opptak, som ga 1,17 s dødtid
+  der passeringer forsvant i stillhet.
+- Fast etterløp på 878 ms er byttet med adaptiv avslutning.
+  Alderen falt fra ~500 ms til ~170 ms.
+- printk i ESB-avbruddet blokkerte 13 ms. Flyttet til hovedløkka.
 
 ## TODO
 
