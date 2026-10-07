@@ -1,124 +1,180 @@
 /*
- * LF-sender for tidtakersystem
+ * Porten: 125 kHz LF-sender + ESB-mottak
  *
- * nRF54L15 P1.11 -> TC4427A -> LC-tank (968 uH + 1650 pF + 10 ohm)
- * Malt 2026-09-22: 70 mA topp i spolen, ca. 57 V maks over kondensatoren.
+ * Steg 2 i tidtakersystemet.
  *
- * Krever VDD:IO = 3,3 V (Board Configurator). Standard 1,8 V ligger
- * under TC4427A sin terskel pa ca. 2 V.
+ * Brettet gjor to jobber samtidig. PWM-en lager baerebolgen pa
+ * 125 kHz og kjorer i maskinvare uten at CPU-en er involvert, sa
+ * feltet star uavbrutt mens radioen lytter.
  *
- * Tre testmoduser, bytt MODE og bygg pa nytt:
- *   1 KONTINUERLIG - fast 125 kHz, for a sjekke signal og driver
- *   2 BURST        - 20 ms pa, 2 s av, som i virkelig drift
- *   3 SVEIP        - 110-145 kHz for a finne resonansen
+ * ESB-delen er kopiert ordrett fra esb_prx-eksempelet i NCS. Endret:
+ *   - LOG-makroer byttet til printk
+ *   - ingen periodisk ACK-nyttelast; porten svarer bare nar brikka
+ *     sender. Eksempelets lokke som skrev en pakke hvert 550. ms er
+ *     fjernet, den hadde ingen hensikt her.
  *
- * Mal over dempemotstanden, ikke over kondensatoren: en kabel uten
- * 10x probe legger til ca. 200 pF og flytter avstemmingen flere kHz.
+ * MERK: porten tidsstempler ikke mottaket enna. Den skriver bare ut
+ * det brikka sendte. Tidsstemplingen er steg 3.
  */
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
+#include <zephyr/devicetree.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/types.h>
+#include <esb.h>
 
-#define MODE_KONTINUERLIG 1
-#define MODE_BURST        2
-#define MODE_SVEIP        3
-
-#define MODE MODE_KONTINUERLIG
-
-/* 16 MHz / 128 = 125,0 kHz */
+/* 125 kHz = 8 us periode */
 #define PERIODE_125K_NS 8000u
-
-#define BURST_MS 20
-#define PAUSE_MS 500
-
-/*
- * Sveip. N er antall klokketikk pa 16 MHz: f = 16 MHz / N.
- * N=128 -> 125,0 kHz. N=110 -> 145 kHz. N=145 -> 110 kHz.
- */
-#define SVEIP_N_MIN    110u
-#define SVEIP_N_MAX    145u
-#define SVEIP_DVELE_MS 1500
 
 static const struct pwm_dt_spec lf = PWM_DT_SPEC_GET(DT_NODELABEL(pwm_lf));
 
-/* Duty 50 % gir sterkest grunnharmonisk */
-static int lf_pa(uint32_t periode_ns)
+#define PAKKE_LEN 16
+
+static struct esb_payload rx_payload;
+
+static uint32_t hent_u32(const uint8_t *p)
 {
-	return pwm_set_dt(&lf, periode_ns, periode_ns / 2u);
+	return (uint32_t)p[0] |
+	       ((uint32_t)p[1] << 8) |
+	       ((uint32_t)p[2] << 16) |
+	       ((uint32_t)p[3] << 24);
 }
 
-static int lf_av(uint32_t periode_ns)
+static void vis_passering(const struct esb_payload *p)
 {
-	return pwm_set_dt(&lf, periode_ns, 0);
+	uint32_t varighet, alder;
+	int32_t avvik;
+	uint8_t id, seq, topp, gulv;
+
+	if (p->length < PAKKE_LEN) {
+		printk("kort pakke, len %d - ignorert\n", p->length);
+		return;
+	}
+
+	id       = p->data[0];
+	seq      = p->data[1];
+	varighet = hent_u32(&p->data[2]);
+	alder    = hent_u32(&p->data[6]);
+	topp     = p->data[10];
+	gulv     = p->data[11];
+	avvik    = (int32_t)hent_u32(&p->data[12]);
+
+	printk("brikke %u  #%3u | varighet %7u us | alder %7u us | "
+	       "topp %2u gulv %2u | avvik %6d us%s\n",
+	       id, seq, varighet, alder, topp, gulv, avvik,
+	       (avvik > (int32_t)(varighet / 10) ||
+		avvik < -(int32_t)(varighet / 10)) ? "  <-- SKJEV" : "");
+}
+
+void event_handler(struct esb_evt const *event)
+{
+	int err;
+
+	switch (event->evt_id) {
+	case ESB_EVENT_TX_SUCCESS:
+		break;
+	case ESB_EVENT_TX_FAILED:
+		printk("ESB: TX FAILED\n");
+		break;
+	case ESB_EVENT_RX_RECEIVED:
+		while ((err = esb_read_rx_payload(&rx_payload)) == 0) {
+			vis_passering(&rx_payload);
+		}
+		if (err && err != -ENODATA) {
+			printk("ESB: feil ved lesing av pakke\n");
+		}
+		break;
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+	case ESB_EVENT_TIMESLOT_FAILED:
+		printk("ESB: feil i timeslot\n");
+		break;
+#endif
+	}
+}
+
+int esb_initialize(void)
+{
+	int err;
+	uint8_t base_addr_0[4] = {0xE7, 0xE7, 0xE7, 0xE7};
+	uint8_t base_addr_1[4] = {0xC2, 0xC2, 0xC2, 0xC2};
+	uint8_t addr_prefix[8] = {0xE7, 0xC2, 0xC3, 0xC4,
+				  0xC5, 0xC6, 0xC7, 0xC8};
+
+	struct esb_config config = ESB_DEFAULT_CONFIG;
+
+	config.protocol = ESB_PROTOCOL_ESB_DPL;
+	config.bitrate = ESB_BITRATE_2MBPS;
+	config.mode = ESB_MODE_PRX;
+	config.event_handler = event_handler;
+	config.selective_auto_ack = true;
+	if (IS_ENABLED(CONFIG_ESB_FAST_SWITCHING)) {
+		config.use_fast_ramp_up = true;
+	}
+
+	err = esb_init(&config);
+	if (err) {
+		return err;
+	}
+
+	err = esb_set_base_address_0(base_addr_0);
+	if (err) {
+		return err;
+	}
+
+	err = esb_set_base_address_1(base_addr_1);
+	if (err) {
+		return err;
+	}
+
+	err = esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
+	if (err) {
+		return err;
+	}
+
+	return 0;
 }
 
 int main(void)
 {
 	int err;
 
+	k_msleep(500);
+
+	printk("\n\n=== Porten: LF-sender + ESB-mottak ===\n\n");
+
 	if (!pwm_is_ready_dt(&lf)) {
-		printk("FEIL: PWM-enheten er ikke klar\n");
-		return -ENODEV;
+		printk("FEIL: PWM ikke klar\n");
+		return 0;
 	}
 
-#if MODE == MODE_KONTINUERLIG
-
-	printk("Modus: kontinuerlig 125 kHz\n");
-	printk("Skop pa P1.11: firkant, 8,0 us periode, 0-3,3 V\n");
-
-	err = lf_pa(PERIODE_125K_NS);
+	/* 50 %% duty, kontinuerlig. Burst er feil her: da folger
+	 * feltet burstene i stedet for passeringen.
+	 */
+	err = pwm_set_dt(&lf, PERIODE_125K_NS, PERIODE_125K_NS / 2u);
 	if (err) {
-		printk("FEIL: pwm_set_dt ga %d\n", err);
-		return err;
+		printk("FEIL: pwm_set_dt, err %d\n", err);
+		return 0;
+	}
+	printk("LF-felt pa, 125 kHz kontinuerlig\n");
+
+	err = esb_initialize();
+	if (err) {
+		printk("FEIL: ESB-init feilet, err %d\n", err);
+		return 0;
 	}
 
-	/* PWM gar i maskinvare, CPU trenger ikke gjore noe */
-	k_sleep(K_FOREVER);
-
-#elif MODE == MODE_BURST
-
-	printk("Modus: burst, %d ms pa / %d ms av\n", BURST_MS, PAUSE_MS);
-
-	while (1) {
-		err = lf_pa(PERIODE_125K_NS);
-		if (err) {
-			printk("FEIL: pwm_set_dt ga %d\n", err);
-			return err;
-		}
-		k_msleep(BURST_MS);
-
-		lf_av(PERIODE_125K_NS);
-		k_msleep(PAUSE_MS);
+	err = esb_start_rx();
+	if (err) {
+		printk("FEIL: esb_start_rx, err %d\n", err);
+		return 0;
 	}
-
-#elif MODE == MODE_SVEIP
-
-	printk("Modus: sveip %u-%u kHz\n",
-	       16000u / SVEIP_N_MAX, 16000u / SVEIP_N_MIN);
-	printk("Se etter storst Pk-Pk over dempemotstanden\n\n");
+	printk("ESB klar (PRX), venter pa passeringer\n\n");
 
 	while (1) {
-		for (uint32_t n = SVEIP_N_MIN; n <= SVEIP_N_MAX; n++) {
-			/* periode = n / 16 MHz, i nanosekunder */
-			uint32_t periode_ns = (n * 125u) / 2u;
-			uint32_t f_hz = 16000000u / n;
-
-			printk("N=%3u  %6u Hz\n", n, f_hz);
-
-			lf_pa(periode_ns);
-			k_msleep(SVEIP_DVELE_MS);
-			lf_av(periode_ns);
-			k_msleep(50);
-		}
-		printk("--- sveip ferdig, starter pa nytt ---\n\n");
 		k_msleep(1000);
 	}
-
-#else
-#error "Ugyldig MODE"
-#endif
 
 	return 0;
 }

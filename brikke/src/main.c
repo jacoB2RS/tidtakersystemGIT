@@ -1,60 +1,49 @@
 /*
- * Brikken: RSSI-skop med ringbuffer, trigger og kantanalyse
+ * Brikken: AS3933 kantmaling + ESB-sending
  *
- * Versjon 2. Endringer:
- *   - Dumpen er kortet kraftig ned. Forrige versjon skrev 6000
- *     linjer med tid og verdi, rundt 6 sekunder pa 115200 baud.
- *     Na skrives tiden en gang i hodet og bare verdiene etterpa,
- *     siden maleintervallet er jevnt pa ca 196 us.
- *   - Brikka regner selv ut t1, t2, varighet og midtpunkt med
- *     interpolasjon, og skriver ut malepunktene rundt hver
- *     kryssing. Da ser dere svaret med en gang, uten a plotte.
+ * Steg 2 i tidtakersystemet.
  *
- * MERK OM VENTETIDEN
- *   Etter trigging tar den POST malinger til for den dumper.
- *   4500 x 196 us = 880 ms. Det er meningen: vi ma fa med det
- *   som skjer ETTER at spolen passerte. Foler det som om den
- *   "ikke gir seg", er det den sekunden pluss utskriften.
+ * Brikka maler RSSI i tett lokke (ca 195 us per maling) inn i en
+ * ringbuffer. Nar feltet passerer en terskel, tar den opp resten av
+ * passeringen, finner de to terskelkryssingene, og sender resultatet
+ * trdlost til porten.
  *
- * TERSKEL brukes bade til a utlose opptaket og til a finne t1/t2.
- * BEKREFT er hvor mange malinger pa rad som ma vaere pa samme side
- * av terskelen for en kryssing godtas. Det er hysteresen var.
+ * ESB-delen er kopiert ordrett fra esb_ptx-eksempelet i NCS. Den
+ * eneste endringen er at LOG-makroene er byttet til printk, fordi
+ * eksempelets loggniva-symbol ikke finnes utenfor eksempelet.
+ *
+ * MERK: ingen tidsstempling pa portsiden enna. Brikka regner ut
+ * alderen pa midtpunktet i det oyeblikket pakken skrives, men
+ * sendingen utloses fra programvare, sa det er noen hundre
+ * mikrosekund usikkerhet i den. Det er steg 4 som fjerner den.
  */
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
+#include <zephyr/devicetree.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/types.h>
+#include <esb.h>
 
-#define SETTLE_US 100
-#define TERSKEL   13
-#define BEKREFT   3
+/* ---------- maleoppsett ---------- */
 
-#define N    6000
-#define POST 4500
+#define SETTLE_US 100	/* ventetid etter reset_RSSI for avlesning */
+#define TRIGGER   13	/* starter opptak. Gulvet er 9. */
+#define BEKREFT   3	/* malinger pa rad for en trigging godtas */
 
-/*
- * TILBAKE TIL DEMPET OPPSETT.
- *
- * Jeg skrudde dempingen av for a vinne rekkevidde. Malingene sier
- * at det var feil vei:
- *
- *   dempet   (-16 dB):  gulv  9,  2 cm -> 23   = 14 trinn a jobbe med
- *   udempet:            gulv 15-19, metning 31 =  12 trinn, og den
- *                       metter tidlig
- *
- * Gulvet her er ikke termisk stoy, det er oppfanget stoy fra
- * omgivelsene. Demping for forsterkeren fjerner stoyen og
- * forsterkeren sitt eget gulv blir staende - derfor faller gulvet
- * mer enn signalet.
- *
- * Det dempede oppsettet har altsa storre brukbart spenn. Vi bruker
- * det.
+#define N    6000	/* ringbuffer, ca 1,17 sekund */
+#define POST 4500	/* malinger etter trigging */
+
+/* Dempet oppsett. Gir gulv 9 og 23 pa 2 cm = 14 trinn a jobbe med.
+ * Uten demping blir gulvet 15-19 og spennet mindre.
  */
 #define GAIN_REDUKSJON 0x09
 #define DEMPER_PA      1
 #define DEMPE_RES      1
 #define TOLERANSE      2
+
+/* ---------- AS3933 ---------- */
 
 #define AS3933_MODE_WRITE 0x00
 #define AS3933_MODE_READ  0x40
@@ -74,12 +63,113 @@
 static const struct spi_dt_spec as3933 =
 	SPI_DT_SPEC_GET(DT_NODELABEL(as3933), SPI_OPER, 0);
 
+/* ---------- pakkeformat ---------- */
+
+#define BRIKKE_ID 0x01
+
+/*
+ *  0     brikke-id
+ *  1     sekvensnummer
+ *  2-5   varighet i us        (t2 - t1)
+ *  6-9   alder i us           (sendeoyeblikk - midtpunkt)
+ *  10    topp-RSSI
+ *  11    gulv-RSSI
+ *  12-15 midtpunkt - topp i us, med fortegn
+ */
+#define PAKKE_LEN 16
+
+static uint8_t sekvens;
+
+/* ---------- maledata ---------- */
+
 static uint8_t  ring_v[N];
 static uint32_t ring_t[N];
-
-/* Utpakket, eldste forst */
-static uint8_t  v[N];
+static uint8_t  v[N];	/* utpakket, eldste forst */
 static uint32_t t[N];
+
+struct resultat {
+	bool     gyldig;
+	uint32_t t1;
+	uint32_t t2;
+	uint32_t midt;
+	uint8_t  topp;
+	uint8_t  gulv;
+	int32_t  avvik;	/* midtpunkt - topp */
+};
+
+/* ---------- ESB, ordrett fra esb_ptx ---------- */
+
+static bool ready = true;
+static struct esb_payload rx_payload;
+static struct esb_payload tx_payload;
+
+void event_handler(struct esb_evt const *event)
+{
+	ready = true;
+
+	switch (event->evt_id) {
+	case ESB_EVENT_TX_SUCCESS:
+		break;
+	case ESB_EVENT_TX_FAILED:
+		printk("ESB: TX FAILED\n");
+		break;
+	case ESB_EVENT_RX_RECEIVED:
+		while (esb_read_rx_payload(&rx_payload) == 0) {
+			/* ACK-nyttelast fra porten. Ikke brukt enna. */
+		}
+		break;
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+	case ESB_EVENT_TIMESLOT_FAILED:
+		printk("ESB: feil i timeslot\n");
+		break;
+#endif
+	}
+}
+
+int esb_initialize(void)
+{
+	int err;
+	uint8_t base_addr_0[4] = {0xE7, 0xE7, 0xE7, 0xE7};
+	uint8_t base_addr_1[4] = {0xC2, 0xC2, 0xC2, 0xC2};
+	uint8_t addr_prefix[8] = {0xE7, 0xC2, 0xC3, 0xC4,
+				  0xC5, 0xC6, 0xC7, 0xC8};
+
+	struct esb_config config = ESB_DEFAULT_CONFIG;
+
+	config.protocol = ESB_PROTOCOL_ESB_DPL;
+	config.retransmit_delay = 600;
+	config.bitrate = ESB_BITRATE_2MBPS;
+	config.event_handler = event_handler;
+	config.mode = ESB_MODE_PTX;
+	config.selective_auto_ack = true;
+	if (IS_ENABLED(CONFIG_ESB_FAST_SWITCHING)) {
+		config.use_fast_ramp_up = true;
+	}
+
+	err = esb_init(&config);
+	if (err) {
+		return err;
+	}
+
+	err = esb_set_base_address_0(base_addr_0);
+	if (err) {
+		return err;
+	}
+
+	err = esb_set_base_address_1(base_addr_1);
+	if (err) {
+		return err;
+	}
+
+	err = esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
+	if (err) {
+		return err;
+	}
+
+	return 0;
+}
+
+/* ---------- AS3933-hjelpere ---------- */
 
 static int les(uint8_t reg, uint8_t *ut)
 {
@@ -140,16 +230,19 @@ static void sett_opp_as3933(void)
 	skriv(8, 0x00);
 	k_msleep(20);
 
+	/* Ma gjores for frekvensdeteksjon virker */
 	kommando(CMD_CALIB_RCO_LC);
 	k_msleep(100);
-	skriv(3, 0x00);
+	skriv(3, 0x00);	/* kalibreringen setter R3 = 0x20 uten a bli bedt om det */
 
 	kommando(CMD_CLEAR_FALSE);
 	kommando(CMD_CLEAR_WAKE);
 	k_msleep(20);
 }
 
-/* Lineaer interpolasjon mellom prove i-1 og i, i mikrosekund */
+/* ---------- analyse ---------- */
+
+/* Lineaer interpolasjon mellom prove i-1 og i */
 static uint32_t kryss(uint32_t i, int32_t niva)
 {
 	int32_t va = v[i - 1];
@@ -162,24 +255,13 @@ static uint32_t kryss(uint32_t i, int32_t niva)
 	return t[i - 1] + (uint32_t)(((niva - va) * dt) / (vb - va));
 }
 
-static void vindu(const char *navn, uint32_t midt)
+static void analyser(struct resultat *r)
 {
-	uint32_t fra = midt > 8 ? midt - 8 : 0;
-	uint32_t til = midt + 8 < N ? midt + 8 : N - 1;
-
-	printk("%s (prove %u):\n", navn, midt);
-	for (uint32_t i = fra; i <= til; i++) {
-		printk("  %7u us  %2u %s\n",
-		       t[i] - t[0], v[i], i == midt ? "<--" : "");
-	}
-}
-
-static void analyser(void)
-{
-	uint32_t i1 = 0, i2 = 0;
+	uint32_t i1 = 0, i2 = 0, i_topp = 0;
 	uint8_t topp = 0, gulv = 31;
-	uint32_t i_topp = 0;
 	int32_t terskel;
+
+	r->gyldig = false;
 
 	for (uint32_t i = 0; i < N; i++) {
 		if (v[i] > topp) {
@@ -190,13 +272,10 @@ static void analyser(void)
 		}
 	}
 
-	/*
-	 * Toppen er et PLATA, ikke et punkt. RSSI har 5 bits, sa naer
-	 * maksimum star verdien stille i mange malinger. Tar vi forste
-	 * prove som nar toppverdien, legger vi toppen for tidlig, og
-	 * "midtpunkt - topp" blir systematisk positiv.
-	 *
-	 * Vi bruker midten av platået i stedet.
+	/* Toppen er et plata, ikke et punkt. RSSI har 5 bits, sa naer
+	 * maksimum star verdien stille i mange malinger. Forste prove
+	 * som nar toppverdien ligger for tidlig og gir systematisk
+	 * skjevhet - vi bruker midten av platået.
 	 */
 	{
 		uint32_t forste = 0, siste = 0;
@@ -212,40 +291,26 @@ static void analyser(void)
 			}
 		}
 		i_topp = (forste + siste) / 2;
-		printk("\ntoppplata: prove %u til %u, %u malinger\n",
-		       forste, siste, siste - forste + 1);
 	}
 
-	/*
-	 * TERSKELEN VELGES ETTERPA, UT FRA KURVEN.
-	 *
-	 * Brikka har tidsstempel pa hver eneste maling, sa den trenger
-	 * ikke bestemme terskelen for passeringen - bare etter. Da kan
-	 * den legges midt mellom gulv og topp, der flanken er brattest
-	 * og kryssingen skarpest.
-	 *
-	 * Det gjor ogsa malingen uavhengig av hvor naer brikka passerte.
-	 * En fast terskel ville ligget nede i foten pa en naer passering
-	 * og oppe pa toppen av en fjern en.
+	/* Terskelen velges etter opptaket, midt mellom gulv og topp.
+	 * Der er flanken brattest, og malingen blir uavhengig av hvor
+	 * naer brikka passerte.
 	 */
 	terskel = (gulv + topp + 1) / 2;
 
-	printk("\n=== ANALYSE ===\n");
-	printk("gulv %u, topp %u ved %u us\n", gulv, topp, t[i_topp] - t[0]);
-	printk("terskel %d (midt mellom gulv og topp)\n", terskel);
+	r->topp = topp;
+	r->gulv = gulv;
 
 	if (topp - gulv < 6) {
-		printk("for svakt. spennet ma vaere minst 6 trinn.\n");
-		printk("Ga naermere senderen.\n");
+		printk("for svakt spenn: gulv %u topp %u\n", gulv, topp);
 		return;
 	}
 
-	/*
-	 * Kryssingene sokes UTOVER FRA TOPPEN, ikke forfra. Soker vi
-	 * forfra, fanger vi forste gang stoyen tilfeldig vipper over
-	 * terskelen. Toppen er derimot utvetydig.
+	/* Sok UTOVER FRA TOPPEN. Soker vi forfra, fanger vi forste gang
+	 * stoyen tilfeldig vipper over terskelen.
 	 */
-	for (uint32_t i = i_topp; i >= 2; i--) {
+	for (uint32_t i = i_topp; i >= BEKREFT; i--) {
 		if (v[i] < terskel && v[i - 1] < terskel &&
 		    v[i - 2] < terskel) {
 			i1 = i + 1;
@@ -253,7 +318,7 @@ static void analyser(void)
 		}
 	}
 
-	for (uint32_t i = i_topp + 1; i + 2 < N; i++) {
+	for (uint32_t i = i_topp + 1; i + BEKREFT < N; i++) {
 		if (v[i] < terskel && v[i + 1] < terskel &&
 		    v[i + 2] < terskel) {
 			i2 = i;
@@ -261,119 +326,101 @@ static void analyser(void)
 		}
 	}
 
-	if (!i1) {
-		printk("fant ingen inngangskryssing\n");
-		return;
-	}
-	if (!i2) {
-		printk("fant inngang men ingen utgang - feltet forsvant "
-		       "ikke innenfor opptaket\n");
-		vindu("FLANKE INN", i1);
+	if (!i1 || !i2) {
+		printk("fant ikke begge kryssinger (i1=%u i2=%u)\n", i1, i2);
 		return;
 	}
 
-	uint32_t t1 = kryss(i1, terskel);
-	uint32_t t2 = kryss(i2, terskel);
-	uint32_t midt = (t1 + t2) / 2;
-
-	printk("t1        %u us\n", t1 - t[0]);
-	printk("t2        %u us\n", t2 - t[0]);
-	printk("varighet  %u us\n", t2 - t1);
-	printk("midtpunkt %u us\n", midt - t[0]);
-
-	/*
-	 * Symmetritest. For en jevn passering skal midtpunktet falle
-	 * sammen med toppen. Avviket er et direkte mal pa hvor ujevn
-	 * farten var, og er den beste kvalitetsindikatoren vi har.
-	 */
-	{
-		int32_t avvik = (int32_t)(midt - t[i_topp]);
-
-		printk("midtpunkt - topp  %d us", avvik);
-		if (avvik > (int32_t)((t2 - t1) / 10) ||
-		    avvik < -(int32_t)((t2 - t1) / 10)) {
-			printk("   <-- SKJEV, over 10%% av varigheten");
-		}
-		printk("\n");
-	}
-
-	vindu("FLANKE INN", i1);
-	vindu("FLANKE UT", i2);
+	r->t1 = kryss(i1, terskel);
+	r->t2 = kryss(i2, terskel);
+	r->midt = (r->t1 + r->t2) / 2;
+	r->avvik = (int32_t)(r->midt - t[i_topp]);
+	r->gyldig = true;
 }
 
-static void dump(uint32_t hode)
+/* ---------- sending ---------- */
+
+static void legg_u32(uint8_t *p, uint32_t x)
 {
-	for (uint32_t k = 0; k < N; k++) {
-		uint32_t i = (hode + k) % N;
-
-		v[k] = ring_v[i];
-		t[k] = ring_t[i];
-	}
-
-	printk("\n--- OPPTAK ---\n");
-	printk("antall %d, varighet %u us, snitt %u ns per prove\n",
-	       N, t[N - 1] - t[0], ((t[N - 1] - t[0]) * 1000) / (N - 1));
-
-	analyser();
-
-	printk("\n---VERDIER--- (bare rssi, jevnt intervall)\n");
-	for (uint32_t k = 0; k < N; k++) {
-		printk("%u%c", v[k], ((k % 50) == 49) ? '\n' : ',');
-	}
-	printk("\n---SLUTT---\n\n");
+	p[0] = (uint8_t)(x);
+	p[1] = (uint8_t)(x >> 8);
+	p[2] = (uint8_t)(x >> 16);
+	p[3] = (uint8_t)(x >> 24);
 }
+
+static void send_resultat(const struct resultat *r)
+{
+	uint32_t na;
+	uint32_t alder;
+	int err;
+
+	tx_payload.pipe = 0;
+	tx_payload.length = PAKKE_LEN;
+	tx_payload.noack = false;
+
+	tx_payload.data[0] = BRIKKE_ID;
+	tx_payload.data[1] = sekvens++;
+	legg_u32(&tx_payload.data[2], r->t2 - r->t1);
+
+	/* Alderen regnes sa sent som mulig for skrivingen */
+	na = k_cyc_to_us_floor32(k_cycle_get_32());
+	alder = na - r->midt;
+	legg_u32(&tx_payload.data[6], alder);
+
+	tx_payload.data[10] = r->topp;
+	tx_payload.data[11] = r->gulv;
+	legg_u32(&tx_payload.data[12], (uint32_t)r->avvik);
+
+	ready = false;
+	esb_flush_tx();
+
+	err = esb_write_payload(&tx_payload);
+	if (err) {
+		printk("ESB: skriving feilet, err %d\n", err);
+		ready = true;
+		return;
+	}
+
+	printk("sendt  varighet %u us  alder %u us  topp %u  gulv %u  "
+	       "avvik %d us\n",
+	       r->t2 - r->t1, alder, r->topp, r->gulv, r->avvik);
+}
+
+/* ---------- hovedprogram ---------- */
 
 int main(void)
 {
 	uint8_t r5;
 	uint32_t hode = 0;
 	uint32_t teller = 0;
-	bool trigget = false;
 	uint32_t igjen = 0;
-	uint8_t maks = 0, min = 31;
-	uint8_t gulv_maks = 0;
 	uint32_t pa_rad = 0;
-	bool foreslatt = false;
+	bool trigget = false;
+	uint8_t maks = 0, min = 31;
+	int err;
 
 	k_msleep(500);
 
-	printk("\n\n=== AS3933 RSSI-skop v2 ===\n\n");
+	printk("\n\n=== Brikke: kantmaling + ESB ===\n\n");
 
 	if (!spi_is_ready_dt(&as3933)) {
 		printk("FEIL: SPI ikke klar\n");
-		return -ENODEV;
+		return 0;
 	}
+
+	err = esb_initialize();
+	if (err) {
+		printk("FEIL: ESB-init feilet, err %d\n", err);
+		return 0;
+	}
+	printk("ESB klar (PTX)\n");
 
 	sett_opp_as3933();
 
 	les(5, &r5);
 	printk("SPI: R5 = 0x%02X %s\n", r5, r5 == 0x69 ? "(ok)" : "(AVVIK)");
-
-	/* Les tilbake det vi skrev. Kalibreringen har endret registre
-	 * bak ryggen var for, sa vi sjekker at dempingen faktisk er av.
-	 */
-	{
-		uint8_t r;
-
-		for (uint8_t i = 0; i <= 8; i++) {
-			les(i, &r);
-			printk("R%-2u = 0x%02X\n", i, r);
-		}
-		les(4, &r);
-		printk("-> gain reduction %u, demperesistor %u",
-		       r & 0x0F, (r >> 4) & 0x03);
-		les(1, &r);
-		printk(", antennedemper %s\n\n",
-		       (r & 0x10) ? "PA" : "av");
-	}
-	printk("SETTLE_US=%d  TERSKEL=%d  BEKREFT=%d  buffer=%d\n\n",
-	       SETTLE_US, TERSKEL, BEKREFT, N);
-	printk("VIKTIG: hold spolen LANGT UNNA de forste 1,2 sekundene.\n");
-	printk("Det er da stoygulvet males. Ligger spolen i feltet da,\n");
-	printk("maler den signalet og kaller det gulv.\n\n");
-	printk("Beveg spolen og se at maks folger avstanden.\n");
-	printk("Nar en maling nar %d gar opptaket, og den maler ca\n", TERSKEL);
-	printk("0,9 sekund til for den skriver ut. Det er meningen.\n\n");
+	printk("TRIGGER=%d  buffer=%d malinger\n\n", TRIGGER, N);
+	printk("Hold spolen unna de forste 1,2 sekundene.\n\n");
 
 	while (1) {
 		uint8_t m = en_maling();
@@ -390,36 +437,18 @@ int main(void)
 			min = m;
 		}
 
-		/* Stoygulv males mens bufferet fylles forste gang */
-		if (teller <= N) {
-			if (m > gulv_maks) {
-				gulv_maks = m;
-			}
-			if (teller == N && !foreslatt) {
-				foreslatt = true;
-				printk("\nStoygulvet toppet pa %u.\n", gulv_maks);
-				printk("Foreslatt TERSKEL = %u. Na star den "
-				       "pa %d.\n\n", gulv_maks + 3, TERSKEL);
-			}
-		}
-
-		/* Enkeltspiker skal ikke trigge - krev BEKREFT pa rad */
-		pa_rad = (m >= TERSKEL) ? pa_rad + 1 : 0;
+		pa_rad = (m >= TRIGGER) ? pa_rad + 1 : 0;
 
 		if (!trigget) {
 			if (pa_rad >= BEKREFT && teller > N) {
-				/* INGEN printk her. En utskrift tar ca 3 ms
-				 * og river et hull i malingene akkurat der
-				 * flanken ligger.
-				 */
 				trigget = true;
 				igjen = POST;
-			} else if ((teller % 1250) == 0) {
-				/* Skriv bare nar det er rolig. En utskrift
-				 * blokkerer pa UART-en i ca 3 ms, og et slikt
-				 * hull rett for triggingen odelegger t1.
+				/* Ingen printk her. En utskrift blokkerer
+				 * pa UART-en i ca 3 ms, og det hullet
+				 * havner noyaktig der t1 skal males.
 				 */
-				if (maks + 2 < TERSKEL) {
+			} else if ((teller % 1250) == 0) {
+				if (maks + 2 < TRIGGER) {
 					printk("venter...  maks=%2u  min=%2u%s\n",
 					       maks, min,
 					       teller <= N ?
@@ -429,17 +458,26 @@ int main(void)
 				min = 31;
 			}
 		} else if (--igjen == 0) {
-			dump(hode);
+			struct resultat r;
+
+			for (uint32_t k = 0; k < N; k++) {
+				uint32_t i = (hode + k) % N;
+
+				v[k] = ring_v[i];
+				t[k] = ring_t[i];
+			}
+
+			analyser(&r);
+
+			if (r.gyldig) {
+				send_resultat(&r);
+			}
 
 			trigget = false;
 			teller = 0;
+			pa_rad = 0;
 			maks = 0;
 			min = 31;
-			pa_rad = 0;
-			gulv_maks = 0;
-			foreslatt = false;
-
-			printk("Venter pa neste.\n\n");
 		}
 	}
 
