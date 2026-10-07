@@ -261,9 +261,10 @@ static uint32_t kryss(uint32_t i, int32_t niva)
 
 static void analyser(struct resultat *r)
 {
-	uint32_t i1 = 0, i2 = 0, i_topp = 0;
+	uint32_t i1 = 0, i2 = 0, i_topp = 0, sist = 0;
 	uint8_t topp = 0, gulv = 31;
 	int32_t terskel;
+	bool funnet = false;
 
 	r->gyldig = false;
 
@@ -276,25 +277,10 @@ static void analyser(struct resultat *r)
 		}
 	}
 
-	/* Toppen er et plata, ikke et punkt. RSSI har 5 bits, sa naer
-	 * maksimum star verdien stille i mange malinger. Forste prove
-	 * som nar toppverdien ligger for tidlig og gir systematisk
-	 * skjevhet - vi bruker midten av platået.
-	 */
-	{
-		uint32_t forste = 0, siste = 0;
-		bool funnet = false;
-
-		for (uint32_t i = 0; i < N; i++) {
-			if (v[i] == topp) {
-				if (!funnet) {
-					forste = i;
-					funnet = true;
-				}
-				siste = i;
-			}
-		}
-		i_topp = (forste + siste) / 2;
+	if (topp - gulv < MIN_SPENN) {
+		printk("forkastet: spenn %u trinn (gulv %u, topp %u)\n",
+		       topp - gulv, gulv, topp);
+		return;
 	}
 
 	/* Terskelen velges etter opptaket, midt mellom gulv og topp.
@@ -303,19 +289,35 @@ static void analyser(struct resultat *r)
 	 */
 	terskel = (gulv + topp + 1) / 2;
 
-	r->topp = topp;
-	r->gulv = gulv;
+	/*
+	 * ANKRE I SISTE PASSERING.
+	 *
+	 * Bufferet dekker 1,17 sekund og kan inneholde halen av en
+	 * tidligere passering. Leter vi etter toppen i hele bufferet,
+	 * og to pukler nar samme toppverdi, havner "midten av platået"
+	 * i dalen mellom dem. Da blir t1 og t2 riktige mens
+	 * toppreferansen er fullstendig feil.
+	 *
+	 * Derfor: finn siste maling over terskelen - det er slutten pa
+	 * passeringen som nettopp utloste opptaket - og arbeid bakover
+	 * derfra.
+	 */
+	for (uint32_t i = N - 1; i >= 1; i--) {
+		if (v[i] >= terskel) {
+			sist = i;
+			funnet = true;
+			break;
+		}
+	}
 
-	if (topp - gulv < MIN_SPENN) {
-		printk("forkastet: spenn %u trinn (gulv %u, topp %u)\n",
-		       topp - gulv, gulv, topp);
+	if (!funnet || sist + 1 >= N) {
+		printk("forkastet: fant ingen utgangsflanke\n");
 		return;
 	}
 
-	/* Sok UTOVER FRA TOPPEN. Soker vi forfra, fanger vi forste gang
-	 * stoyen tilfeldig vipper over terskelen.
-	 */
-	for (uint32_t i = i_topp; i >= BEKREFT; i--) {
+	i2 = sist + 1;
+
+	for (uint32_t i = sist; i >= BEKREFT; i--) {
 		if (v[i] < terskel && v[i - 1] < terskel &&
 		    v[i - 2] < terskel) {
 			i1 = i + 1;
@@ -323,16 +325,8 @@ static void analyser(struct resultat *r)
 		}
 	}
 
-	for (uint32_t i = i_topp + 1; i + BEKREFT < N; i++) {
-		if (v[i] < terskel && v[i + 1] < terskel &&
-		    v[i + 2] < terskel) {
-			i2 = i;
-			break;
-		}
-	}
-
-	if (!i1 || !i2) {
-		printk("fant ikke begge kryssinger (i1=%u i2=%u)\n", i1, i2);
+	if (!i1) {
+		printk("forkastet: fant ingen inngangsflanke\n");
 		return;
 	}
 
@@ -344,6 +338,38 @@ static void analyser(struct resultat *r)
 		return;
 	}
 
+	/*
+	 * Topp og platå regnes BARE innenfor passeringen. Toppen er et
+	 * plata, ikke et punkt - RSSI har 5 bits, sa naer maksimum star
+	 * verdien stille i mange malinger. Forste prove som nar
+	 * toppverdien ligger for tidlig og gir systematisk skjevhet.
+	 */
+	{
+		uint8_t lokal_topp = 0;
+		uint32_t forste = i1, siste = i1;
+		bool sett = false;
+
+		for (uint32_t i = i1; i <= i2; i++) {
+			if (v[i] > lokal_topp) {
+				lokal_topp = v[i];
+			}
+		}
+		for (uint32_t i = i1; i <= i2; i++) {
+			if (v[i] != lokal_topp) {
+				continue;
+			}
+			if (!sett) {
+				forste = i;
+				sett = true;
+			}
+			siste = i;
+		}
+
+		i_topp = (forste + siste) / 2;
+		r->topp = lokal_topp;
+	}
+
+	r->gulv = gulv;
 	r->midt = (r->t1 + r->t2) / 2;
 	r->avvik = (int32_t)(r->midt - t[i_topp]);
 	r->gyldig = true;
