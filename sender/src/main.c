@@ -34,6 +34,43 @@ static const struct pwm_dt_spec lf = PWM_DT_SPEC_GET(DT_NODELABEL(pwm_lf));
 
 static struct esb_payload rx_payload;
 
+/*
+ * Portens egen klokke.
+ *
+ * k_uptime_ticks() er 64 bit og monoton - den ruller ikke rundt.
+ * Opplosningen er CONFIG_SYS_CLOCK_TICKS_PER_SEC, satt til 32768 i
+ * prj.conf, altsa 30,5 us per tikk. Det er 33 ganger finere enn
+ * millisekundbudsjettet.
+ *
+ * Tidsstempelet tas forst i avbruddsrutinen, for noe annet gjores.
+ * Da er forsinkelsen fra radioen mottok pakken til vi leser klokka
+ * noen mikrosekund.
+ */
+static uint64_t na_us(void)
+{
+	return k_ticks_to_us_floor64(k_uptime_ticks());
+}
+
+static uint64_t forrige_passering;
+static bool har_forrige;
+
+/*
+ * Avbruddsrutinen tar tidsstempelet og legger pakken til side.
+ * Utskriften skjer i hovedlokka.
+ *
+ * Grunnen: to linjer pa 115200 baud blokkerer i rundt 13 ms, og en
+ * printk inne i ESB-stackens avbrudd ville holdt radioen opptatt
+ * hele den tiden.
+ */
+struct hendelse {
+	uint64_t mottak;
+	uint8_t  data[PAKKE_LEN];
+	uint8_t  len;
+};
+
+static struct hendelse ko;
+static volatile bool ko_full;
+
 static uint32_t hent_u32(const uint8_t *p)
 {
 	return (uint32_t)p[0] |
@@ -42,30 +79,50 @@ static uint32_t hent_u32(const uint8_t *p)
 	       ((uint32_t)p[3] << 24);
 }
 
-static void vis_passering(const struct esb_payload *p)
+static void vis_passering(const uint8_t *d, uint8_t len, uint64_t mottak)
 {
 	uint32_t varighet, alder;
+	uint64_t passering;
 	int32_t avvik;
 	uint8_t id, seq, topp, gulv;
 
-	if (p->length < PAKKE_LEN) {
-		printk("kort pakke, len %d - ignorert\n", p->length);
+	if (len < PAKKE_LEN) {
+		printk("kort pakke, len %u - ignorert\n", len);
 		return;
 	}
 
-	id       = p->data[0];
-	seq      = p->data[1];
-	varighet = hent_u32(&p->data[2]);
-	alder    = hent_u32(&p->data[6]);
-	topp     = p->data[10];
-	gulv     = p->data[11];
-	avvik    = (int32_t)hent_u32(&p->data[12]);
+	id       = d[0];
+	seq      = d[1];
+	varighet = hent_u32(&d[2]);
+	alder    = hent_u32(&d[6]);
+	topp     = d[10];
+	gulv     = d[11];
+	avvik    = (int32_t)hent_u32(&d[12]);
 
-	printk("brikke %u  #%3u | varighet %7u us | alder %7u us | "
-	       "topp %2u gulv %2u | avvik %6d us%s\n",
-	       id, seq, varighet, alder, topp, gulv, avvik,
+	/* Dette er hele poenget: passeringen plasseres pa portens egen
+	 * tidsakse, uten at de to brettene har synkroniserte klokker.
+	 */
+	passering = mottak - alder;
+
+	printk("brikke %u  #%3u | PASSERTE %llu.%06llu s",
+	       id, seq, passering / 1000000ULL, passering % 1000000ULL);
+
+	if (har_forrige) {
+		uint64_t d = passering - forrige_passering;
+
+		printk(" | siden forrige %llu.%03llu s",
+		       d / 1000000ULL, (d % 1000000ULL) / 1000ULL);
+	}
+	printk("\n");
+
+	printk("         varighet %7u us | alder %7u us | topp %2u gulv %2u"
+	       " | avvik %6d us%s\n",
+	       varighet, alder, topp, gulv, avvik,
 	       (avvik > (int32_t)(varighet / 10) ||
 		avvik < -(int32_t)(varighet / 10)) ? "  <-- SKJEV" : "");
+
+	forrige_passering = passering;
+	har_forrige = true;
 }
 
 void event_handler(struct esb_evt const *event)
@@ -78,14 +135,27 @@ void event_handler(struct esb_evt const *event)
 	case ESB_EVENT_TX_FAILED:
 		printk("ESB: TX FAILED\n");
 		break;
-	case ESB_EVENT_RX_RECEIVED:
+	case ESB_EVENT_RX_RECEIVED: {
+		/* Tidsstempel forst. Alt annet kan vente. */
+		uint64_t mottak = na_us();
+
 		while ((err = esb_read_rx_payload(&rx_payload)) == 0) {
-			vis_passering(&rx_payload);
+			if (ko_full) {
+				continue;	/* hovedlokka henger etter */
+			}
+			ko.mottak = mottak;
+			ko.len = rx_payload.length;
+			for (int i = 0; i < PAKKE_LEN &&
+					i < rx_payload.length; i++) {
+				ko.data[i] = rx_payload.data[i];
+			}
+			ko_full = true;
 		}
 		if (err && err != -ENODATA) {
 			printk("ESB: feil ved lesing av pakke\n");
 		}
 		break;
+	}
 #if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
 	case ESB_EVENT_TIMESLOT_FAILED:
 		printk("ESB: feil i timeslot\n");
@@ -170,10 +240,24 @@ int main(void)
 		printk("FEIL: esb_start_rx, err %d\n", err);
 		return 0;
 	}
-	printk("ESB klar (PRX), venter pa passeringer\n\n");
+	printk("ESB klar (PRX), venter pa passeringer\n");
+	printk("Klokkeopplosning: %u us per tikk\n\n",
+	       1000000u / CONFIG_SYS_CLOCK_TICKS_PER_SEC);
 
 	while (1) {
-		k_msleep(1000);
+		if (ko_full) {
+			uint8_t d[PAKKE_LEN];
+			uint64_t mottak = ko.mottak;
+			uint8_t len = ko.len;
+
+			for (int i = 0; i < PAKKE_LEN; i++) {
+				d[i] = ko.data[i];
+			}
+			ko_full = false;
+
+			vis_passering(d, len, mottak);
+		}
+		k_msleep(2);
 	}
 
 	return 0;
